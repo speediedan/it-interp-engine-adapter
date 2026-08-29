@@ -15,6 +15,12 @@ requires:
   # design (it prefers load-time errors over silently wrong engines). `~=1.3` is therefore a
   # correctness pin rather than caution, and every engine symbol is reached through one seam below
   # so a 1.4 rename is a one-file change.
-  interpretune: ">=0.1.0"
+  # NOTE the ".dev0": `>=0.1.0` EXCLUDES `0.1.0.devN`, because a dev release sorts BEFORE its own
+  # final. So the obvious spelling locks out everyone developing interpretune at the version the
+  # component was written against -- which is every contributor. Caught by loading it, 2026-08-28.
+  interpretune: ">=0.1.0.dev0"
   pip:
-    - "interp-engine~=1.3"
+    # NOTE the trailing ".0": `~=1.3` would admit 1.4, which is precisely the break this pin
+    # exists to prevent. Caught by a resolver dry run on 2026-08-28, which offered 1.4.0 against a
+    # pin whose comment says it holds the 1.3 line. `~=1.3.0` is >=1.3.0, ==1.3.*.
+    - "interp-engine~=1.3.0"
