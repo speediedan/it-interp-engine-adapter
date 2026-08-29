@@ -1,0 +1,25 @@
+name: tests
+
+# This component owns its own correctness. Interpretune's core suite tests the RAILS against a
+# fixture adapter and carries one optional contract test against the published component; it does
+# not test this adapter's behaviour, so an interp-engine release that moves a signature turns this
+# repo red rather than a framework nobody expects to break.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # The pinned engine line, and interpretune for the registration surface the entrypoint uses.
+          pip install -e ".[test]" interpretune
+      - name: Test
+        run: pytest -v
