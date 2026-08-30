@@ -30,7 +30,9 @@ jobs:
           python -m pip install --upgrade pip uv
           # The pinned engine line, plus interpretune (from source; not yet on PyPI) for the
           # registration surface the entrypoint uses. CPU torch keeps the hosted runner light.
-          uv pip install --system --torch-backend=cpu -e ".[test]" \
+          # jsonschema: interpretune imports it eagerly but does not yet declare it
+          # (speediedan/interpretune#403); drop once #404 merges.
+          uv pip install --system --torch-backend=cpu -e ".[test]" jsonschema \
             "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
       - name: Test
         run: pytest -v
@@ -44,7 +46,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip uv
-          uv pip install --system -e ".[test]" \
+          uv pip install --system -e ".[test]" jsonschema \
             "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
       - name: Test (GPU)
         run: |
