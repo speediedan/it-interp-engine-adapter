@@ -47,7 +47,7 @@ cost one wrong diagnosis).
 > AGENT_UID=${AGENT_UID:-998}
 > ```
 
-## Gather the agent-side evidence
+## Step 1: Gather the agent-side evidence
 
 `az-pipelines-ops` Step 3 is REST-only and deliberately does not touch the agent host. The
 classification below needs the agent's own logs, so those commands live here:
@@ -61,7 +61,10 @@ ls -1t "$AGENT_HOME"/_diag/Worker_*.log | head
   `az-pipelines-ops` question, not this one. Go back.
 - A new worker log exists → read it, and classify below.
 
-## Classify the failure
+## Step 2: Classify the failure
+
+The branches below are alternatives, not a sequence, so they are headings rather than numbered steps.
+Only the gather-then-classify order is real.
 
 ### Infrastructure
 
