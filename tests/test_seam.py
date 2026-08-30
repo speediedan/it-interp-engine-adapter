@@ -67,7 +67,7 @@ class TestSublayerInputRefusal:
     def test_both_spellings_of_the_sublayer_input_agree(self, hook_name):
         """The norm's output IS the MLP's argument: measured identical, cos 1.000000."""
         point = _Seam.point_for(hook_name, model=None)
-        assert point.point == "mlp_in"
+        assert point.name == "mlp_in"
         assert point.layer == 5
 
 

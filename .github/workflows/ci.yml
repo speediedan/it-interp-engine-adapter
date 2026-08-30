@@ -31,9 +31,14 @@ jobs:
           # The pinned engine line, plus interpretune (from source; not yet on PyPI) for the
           # registration surface the entrypoint uses. CPU torch keeps the hosted runner light.
           # TEMPORARY: track interpretune's fix branch; a bare install of main cannot be
-          # imported until speediedan/interpretune#404 (two undeclared/eager-import defects,
-          # #403) merges. Flip back to @main and drop this comment when it does.
+          # imported until speediedan/interpretune#404 (undeclared/eager-import defects, #403)
+          # merges. Flip back to @main and drop this comment when it does.
+          #
+          # transformer-lens + sae-lens: interpretune's core config imports both eagerly even
+          # though this adapter uses neither -- measured evidence for the restructure tracked in
+          # speediedan/interpretune#401. Drop them when that lands.
           uv pip install --system --torch-backend=cpu -e ".[test]" \
+            "transformer-lens>=3.5.1,<4" "sae_lens>=6.49.0" \
             "interpretune @ git+https://github.com/speediedan/interpretune.git@fix/declare-jsonschema-dep"
       - name: Test
         run: pytest -v
@@ -48,6 +53,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip uv
           uv pip install --system -e ".[test]" \
+            "transformer-lens>=3.5.1,<4" "sae_lens>=6.49.0" \
             "interpretune @ git+https://github.com/speediedan/interpretune.git@fix/declare-jsonschema-dep"
       - name: Test (GPU)
         run: |

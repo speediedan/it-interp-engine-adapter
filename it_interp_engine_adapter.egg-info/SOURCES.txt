@@ -1,0 +1,9 @@
+README.md
+interp_engine_adapter.py
+pyproject.toml
+it_interp_engine_adapter.egg-info/PKG-INFO
+it_interp_engine_adapter.egg-info/SOURCES.txt
+it_interp_engine_adapter.egg-info/dependency_links.txt
+it_interp_engine_adapter.egg-info/requires.txt
+it_interp_engine_adapter.egg-info/top_level.txt
+tests/test_seam.py
