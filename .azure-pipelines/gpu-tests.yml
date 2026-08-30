@@ -1,0 +1,152 @@
+# Self-hosted GPU tests for the interp-engine adapter.
+#
+# WHY THIS EXISTS ALONGSIDE .github/workflows/ci.yml
+#
+# `ci.yml`'s `cpu` job is the gate that runs on every push. Its `gpu` job is deliberately inert: it is
+# `workflow_dispatch`-only against `runs-on: [self-hosted, gpu]`, and exists as the shape a HUB
+# CONTRIBUTOR with their own GPU runner would use. There is no GitHub Actions self-hosted runner on the
+# maintainer's host, so that job never runs here and is not the route to GPU coverage for this repo.
+#
+# This pipeline is that route. It targets the same self-hosted Azure agent interpretune and
+# finetuning-scheduler already use, which is where this host's GPUs actually are.
+#
+# PATH FILTERS AND PULL REQUESTS -- read before assuming a docs push will be skipped.
+#
+# For a `pr:` trigger these filters are evaluated against the PULL REQUEST's cumulative diff, not the
+# delta of the push that fired it, because a pipeline validates the merge commit. So once a PR touches
+# `src/**`, every later push re-triggers it, including a docs-only one. `[skip ci]` does not rescue
+# this: Microsoft documents that PR pipelines run on the merge commit regardless of skip tokens, which
+# suppress only CI/branch triggers. What the filters DO buy is skipping a PR whose ENTIRE diff is
+# documentation, which is why the exclusions are stated rather than left implicit.
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/**
+      - tests/**
+      - pyproject.toml
+      - it_component.yaml
+      - .azure-pipelines/**
+      - scripts/gpu_lease_wrap.sh
+    exclude:
+      - docs/**
+      - "*.md"
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/**
+      - tests/**
+      - pyproject.toml
+      - it_component.yaml
+      - .azure-pipelines/**
+      - scripts/gpu_lease_wrap.sh
+    exclude:
+      - docs/**
+      - "*.md"
+  drafts: false # only for PRs that are ready for review
+
+jobs:
+  - job: gpu
+    timeoutInMinutes: 45
+    cancelTimeoutInMinutes: 2
+
+    pool:
+      name: default
+
+    # CONTAINER, and specifically interpretune's image, for three reasons rather than convention:
+    #   1. The agent host's default `python3` is 3.10, below this project's `requires-python = ">=3.11"`.
+    #      A non-container job would have to hand-pick an interpreter and build an env from scratch.
+    #   2. The image already carries python 3.13 and a CUDA torch, so the install below adds only this
+    #      package and its interpretune/engine dependencies rather than ~2GB of wheels per run.
+    #   3. `ci_gpu_lease_acquire` records `container=yes` in the lease holder metadata unconditionally.
+    #      That tag is what marks a lease as CI-held, and the "never force-reset a CI-held lease" rule
+    #      depends on it being TRUE -- a non-container job would tag a host-visible pid as containerised
+    #      and misdirect anyone triaging a stuck lease.
+    container:
+      image: speediedan/interpretune:py3.13-pt2.13.0-azpl-init
+      mapDockerSocket: false
+      volumes:
+        - /opt/az_pipeline_agent/_work/hf_cache/$(Agent.Name):/opt/hf_cache:rw
+        # Host GPU-lease rendezvous directory. `flock` works on the inode, so a bind-mounted lock file
+        # interlocks between this container and processes on the host, which is what serializes this
+        # job against local GPU work WITHOUT any change to the agent installation. Fails open if absent.
+        - /tmp/di_leases:/gpu_leases
+      options: --gpus all --shm-size=512m
+      env:
+        HF_HOME: /opt/hf_cache
+        HF_DATASETS_CACHE: /opt/hf_cache/datasets
+        HF_HUB_CACHE: /opt/hf_cache/hub
+        XDG_CACHE_HOME: /opt/hf_cache
+
+    workspace:
+      clean: outputs
+
+    steps:
+      # Serialize against local GPU work on this host. The agent runs one job at a time, so this guards
+      # only against interactive/agent sessions and the sibling projects' suites. Waiting here for tens
+      # of minutes is the system working, not a hung build: do not cancel, and never force-reset the
+      # lease from the host side. See the `gpu-lease` and `az-pipelines-debug` skills.
+      - bash: |
+          source scripts/gpu_lease_wrap.sh
+          ci_gpu_lease_acquire /gpu_leases /tmp/azp_gpu_lease.pid 2400 "azure-iea-$(Build.BuildId)"
+        displayName: "Acquire host GPU lease"
+
+      - bash: |
+          set -e
+          echo "=== interpreter ==="
+          python --version
+          python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+          echo "=== install ==="
+          python -m pip install --upgrade pip uv
+          # Mirrors .github/workflows/ci.yml's install, with ONE deliberate difference: no
+          # `--torch-backend=cpu`. The image's CUDA torch is the point of running here, and forcing the
+          # CPU variant would silently make every GPU assertion below vacuous.
+          #
+          # TEMPORARY: tracks interpretune's fix branch; a bare install of main cannot be imported until
+          # speediedan/interpretune#404 merges. This is the THIRD call site of that pin (the other two
+          # are in ci.yml); flip all three together and drop this comment.
+          #
+          # transformer-lens + sae-lens are hand-carried because interpretune's core config imports both
+          # eagerly even though this adapter uses neither (speediedan/interpretune#401).
+          uv pip install --system -e ".[test]" \
+            "transformer-lens>=3.5.1,<4" "sae_lens>=6.49.0" \
+            "interpretune @ git+https://github.com/speediedan/interpretune.git@fix/declare-jsonschema-dep"
+        displayName: "Install"
+
+      - bash: |
+          set -e
+          nvidia-smi
+          python -c "import torch; assert torch.cuda.is_available(), 'no CUDA device visible to this job'"
+          echo "visible devices: $(python -c 'import torch; print(torch.cuda.device_count())')"
+        displayName: "Verify GPU visibility"
+
+      # REPORT `collected` BESIDE `passed`. A green pytest summary answers "did the tests I SELECTED
+      # pass" and reads as "did the tests pass". Those differ the moment anything narrows selection, and
+      # `IT_RUN_CUDA_TESTS` is a SELECTOR in interpretune's conftest (it replaces the collected list
+      # rather than adding to it), not merely a gate that un-skips tests.
+      #
+      # Today this repo has no conftest and no CUDA-marked tests, so both numbers are the full suite and
+      # this job runs the same tests as the CPU gate on GPU hardware. That is expected until the first
+      # device-dependent test lands. The comparison below is here so that when one does, a narrowed run
+      # cannot be reported as a full one.
+      - bash: |
+          set -e
+          collected=$(python -m pytest --collect-only -q 2>/dev/null | tail -1)
+          echo "full collection: ${collected}"
+          IT_RUN_CUDA_TESTS=1 python -m pytest -v --durations=25
+        displayName: "Test (GPU)"
+
+      # `always()` so a failed or cancelled build still releases. Container teardown would free the
+      # flock regardless (the kernel releases the fd when the holder dies), but the holder METADATA file
+      # is removed here, and a stale holder is what makes `--status` misattribute a hold.
+      - bash: |
+          source scripts/gpu_lease_wrap.sh 2>/dev/null && \
+            ci_gpu_lease_release /gpu_leases /tmp/azp_gpu_lease.pid || true
+        displayName: "Release host GPU lease"
+        condition: always()
