@@ -103,10 +103,26 @@ jobs:
           python --version
           python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
           echo "=== install ==="
-          python -m pip install --upgrade pip uv
-          # Mirrors .github/workflows/ci.yml's install, with ONE deliberate difference: no
+          # NO pip BOOTSTRAP, and NO `--system`. Both were wrong in the first revision of this file and
+          # the image's own shape is why (measured on build 951, and confirmed against
+          # interpretune's dockers/base-cuda/Dockerfile):
+          #
+          #   PATH        /tmp/venvs/it_dev/bin:...:/usr/local/bin
+          #   VIRTUAL_ENV /tmp/venvs/it_dev
+          #
+          #   * The active interpreter is a `uv venv`, and uv does not put pip in one. So
+          #     `python -m pip ...` fails with "No module named pip" before doing anything -- which is
+          #     exactly how build 951 died.
+          #   * `uv` is already installed system-wide at /usr/local/bin by the image, so there is
+          #     nothing to bootstrap.
+          #   * `uv pip install --system` would target /usr/lib/python3.13/site-packages, but the CUDA
+          #     torch lives in the VENV. That would have resolved a SECOND torch alongside the one this
+          #     job exists to exercise. Bare `uv pip install` honours VIRTUAL_ENV and installs beside it.
+          #
+          # Mirrors .github/workflows/ci.yml's install otherwise, with ONE deliberate difference: no
           # `--torch-backend=cpu`. The image's CUDA torch is the point of running here, and forcing the
           # CPU variant would silently make every GPU assertion below vacuous.
+          uv --version
           #
           # TEMPORARY: tracks interpretune's fix branch; a bare install of main cannot be imported until
           # speediedan/interpretune#404 merges. This is the THIRD call site of that pin (the other two
@@ -114,9 +130,11 @@ jobs:
           #
           # transformer-lens + sae-lens are hand-carried because interpretune's core config imports both
           # eagerly even though this adapter uses neither (speediedan/interpretune#401).
-          uv pip install --system -e ".[test]" \
+          uv pip install -e ".[test]" \
             "transformer-lens>=3.5.1,<4" "sae_lens>=6.49.0" \
             "interpretune @ git+https://github.com/speediedan/interpretune.git@fix/declare-jsonschema-dep"
+          echo "=== resolved, and from WHERE (a version string would not show a second torch) ==="
+          python -c "import torch, interpretune, interp_engine_adapter as a; print(torch.__file__); print(interpretune.__file__); print(a.__file__)"
         displayName: "Install"
 
       - bash: |
