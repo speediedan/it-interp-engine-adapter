@@ -75,15 +75,36 @@ curl -sS -u ":${AZURE_DEVOPS_EXT_PAT}" \
   "https://dev.azure.com/<org>/<project>/_apis/pipelines/approvals?state=pending&api-version=7.1-preview.1"
 ```
 
-- Build `notStarted` **and** approvals pending → approve before touching the agent.
-- No approval pending → inspect queue backlog, worker dispatch and agent availability next.
+**For a `notStarted` build, read the TIMELINE first.** It is the only source that distinguishes the
+three cases, and two of them are invisible to the approvals API:
+
+```bash
+curl -sS -u ":${AZURE_DEVOPS_EXT_PAT}" \
+  "$ORG/$P/_apis/build/builds/<id>/timeline?api-version=7.1" | python3 -m json.tool | grep -A2 Checkpoint
+```
+
+| Timeline shows | Meaning | Do this |
+| --- | --- | --- |
+| `Checkpoint.Approval: pending` | human gate | approve with `manage-approvals.sh` |
+| `Checkpoint.Authorization: inProgress` | a protected resource is not authorized for this definition | someone with permission must Permit it; see below |
+| no checkpoint records at all | genuine queue or dispatch problem | only now inspect backlog, worker dispatch, agent health |
+
+**A first run of a NEWLY CREATED definition lands in the second case every time**, because a cloned
+definition inherits its resource authorizations and a fresh one does not. Measured 2026-08-30 on
+definition 4's build 951: the approvals API returned `count: 0` and `manage-approvals.sh -m list`
+printed "No pending approvals found" for a build that was very much blocked, while the timeline
+carried `Checkpoint.Authorization: inProgress`. Check `pipelinePermissions` for the pool queue to
+confirm, and note the queue id is not the pool id (`queues?api-version=7.1-preview.1` maps them; here
+queue 10 is pool 1 `Default`). Once the resource is permitted, the human gate materializes normally.
 
 ### The queries under-report, in the dangerous direction
 
 - **`az pipelines build list` defaults to COMPLETED builds.** A gated build is therefore invisible to
   exactly the scan you would reflexively run to find it. Pass `--status notStarted`, or query the
-  approvals endpoint. Pending gates for PR-gated builds are visible **only** via the approvals API,
-  because the build sits `notStarted` and scanning build timelines finds nothing.
+  approvals endpoint. A pending gate on an ESTABLISHED pipeline shows in the approvals API and not in
+  a build-list scan. Do not extend that to "the timeline finds nothing": an earlier revision of this
+  file said exactly that, and it is false for the authorization case above, where the timeline is the
+  only place the block appears.
 - **Always check `sourceBranch` and `sourceVersion`, not just the build number**, before calling a
   commit validated. Earlier successful builds are easy to mistake for the one you are waiting on.
 - **Multiple test phases are Tasks inside ONE Job.** A job-level watch shows a single record, so "the
@@ -138,8 +159,11 @@ az pipelines agent list --organization https://dev.azure.com/<org> --pool-id <id
 
 ## Step 4: Triage the failure class
 
-**Queue / approval**: build stays `notStarted`, no worker log, approval query returns pending.
-Approve first. Only restart the agent if approvals are clear and the pool still is not dispatching.
+**Queue / approval**: build stays `notStarted`, no worker log. Read the timeline (Step 1) before
+concluding anything. `Checkpoint.Approval: pending` means approve first. `Checkpoint.Authorization:
+inProgress` means a resource needs permitting and the agent is healthy. **An empty approvals API is
+not evidence the agent is at fault** -- that inference is what routes a permissions problem into an
+agent restart, and it is wrong for every newly created definition's first run.
 
 **Infrastructure**: worker log starts then dies before test output; agent log shows docker socket,
 SSL, or shutdown issues. Agents are explicitly authorized to run:
