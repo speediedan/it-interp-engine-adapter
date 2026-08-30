@@ -35,6 +35,21 @@ repos:
       - id: yesqa
         name: Unused noqa
 
+  - repo: local
+    hooks:
+      # Offline and dependency-free ON PURPOSE. This repo is public, and a hook that reaches for a
+      # private path or the network fails on a clean contributor checkout; a hook that fails on a
+      # clean checkout teaches people to pass --no-verify, which disables every other hook here.
+      # `verbose: true` so it reports what it verified on the pass path -- a silent pass is
+      # indistinguishable from a hook that never ran.
+      - id: vendored-skills-unmodified
+        name: Vendored skills are not edited here
+        entry: python3 scripts/check_vendored_skills.py
+        language: system
+        files: ^\.claude/skills/
+        pass_filenames: false
+        verbose: true
+
   - repo: https://github.com/charliermarsh/ruff-pre-commit
     rev: 'v0.12.10'
     hooks:
