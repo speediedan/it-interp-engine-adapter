@@ -232,7 +232,12 @@ definitions all stay maintainer-only: they change the trust boundary or destroy 
 
 ## What not to do
 
-- Do not restart the agent before checking for a pending approval.
+- Do not restart the agent to clear a stuck build until the **timeline** has ruled out BOTH a pending
+  approval and an unauthorized resource. "Check for a pending approval" is not sufficient and was the
+  wording here until 2026-08-30: it routes you to the approvals API, which returns `count: 0` for an
+  authorization-blocked build, so the check you were told to run reports clear and you restart a
+  healthy agent. A guard that conducts you through a failing check is worse than no guard, because it
+  converts an uncertain reader into a confident one.
 - Do not assume a build-level `queue.name` of `Azure Pipelines` means the YAML job pool changed.
 - Do not force-reset a lease held by CI, or kill the agent to recover one.
 - Do not permanently disable GPU coverage to avoid OOMs.
