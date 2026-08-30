@@ -66,17 +66,17 @@ to another project's job or local suite. Check `project=` before assuming it is 
 `restart-stack.sh` is for a wedged agent, not for lease recovery. Restarting it mid-job strands the
 run without releasing anything the kernel would not have released anyway.
 
-## Step 1: Verify auth, build state, and the approval gate
+## Step 1: Verify auth and build state, then read the timeline
 
 ```bash
 printenv AZURE_DEVOPS_EXT_PAT | wc -c
 az pipelines build show --id <build_id> --organization https://dev.azure.com/<org> --project <project> -o table
-curl -sS -u ":${AZURE_DEVOPS_EXT_PAT}" \
-  "https://dev.azure.com/<org>/<project>/_apis/pipelines/approvals?state=pending&api-version=7.1-preview.1"
 ```
 
-**For a `notStarted` build, read the TIMELINE first.** It is the only source that distinguishes the
-three cases, and two of them are invisible to the approvals API:
+**For a `notStarted` build, read the TIMELINE before querying approvals.** It is the only source that
+distinguishes the three cases, and two of them are invisible to the approvals API. The approvals query
+appears in Step 2, where it is used to ACT on a gate the timeline has already identified; running it
+here instead is how an authorization block gets read as clearance.
 
 ```bash
 curl -sS -u ":${AZURE_DEVOPS_EXT_PAT}" \
