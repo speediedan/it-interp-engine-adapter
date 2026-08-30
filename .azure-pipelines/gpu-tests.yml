@@ -156,6 +156,26 @@ jobs:
           IT_RUN_CUDA_TESTS=1 python -m pytest -v --durations=25
         displayName: "Test (GPU)"
 
+      # WORKSPACE OWNERSHIP, and it must run INSIDE the container, where this uid can still write.
+      # Under rootless docker with userns remapping, everything this job writes into the mapped
+      # workspace is owned by the container's host subuid, not by the agent. The agent's next build
+      # begins with `git clean -ffdx` / `git reset --hard` as ITSELF, cannot remove those files, and
+      # falls back to deleting the source folder, which fails the same way -- so the checkout task
+      # fails before any step of ours runs and every subsequent build fails identically until someone
+      # with privileges clears the folder by hand. `.pytest_cache` is the only directory in this
+      # category today; the chmod covers anything else the run leaves behind.
+      #
+      # Measured here: a build failed at `Checkout ... to s` in 22s with
+      # `System.UnauthorizedAccessException: Access to the path '.../s/.pytest_cache/v/cache/nodeids'
+      # is denied`, left by the previous green run. Interpretune's own pipeline carries the same step
+      # for the same reason; this is that fix, not a new idea.
+      - bash: |
+          sudo chmod -R 775 "$(Build.SourcesDirectory)" || true
+          sudo rm -rf "$(Build.SourcesDirectory)/.pytest_cache" || true
+          echo "workspace ownership normalized for the next build"
+        displayName: "Normalize workspace ownership"
+        condition: always()
+
       # `always()` so a failed or cancelled build still releases. Container teardown would free the
       # flock regardless (the kernel releases the fd when the holder dies), but the holder METADATA file
       # is removed here, and a stale holder is what makes `--status` misattribute a hold.
