@@ -47,6 +47,32 @@ cost one wrong diagnosis).
 > AGENT_UID=${AGENT_UID:-998}
 > ```
 
+## Local tooling the shared half cannot name
+
+`az-pipelines-ops` is repo-neutral, so it describes releasing a gate and registering a definition
+without naming the tools, which live in the maintainer's **private** admin repo. Those paths belong
+here or nowhere:
+
+```bash
+cd ~/repos/distributed-insight/project_admin/shared_admin_scripts/az_pipeline_agent_scripts
+./manage-approvals.sh -o speediedan -p interpretune -m list
+./manage-approvals.sh -o speediedan -p interpretune -m approve -i "<approval_id>" -c "<why>"
+./manage-pipelines.sh -o speediedan -p interpretune -m show -i <definitionId>
+```
+
+**Identify each gate before releasing it** (`az-pipelines-ops` Step 2 gives the `$expand=steps` query).
+This pointer carries the short form because a reader who arrives here for the script path would
+otherwise have to reach What Not To Do at the bottom to meet the warning.
+
+- **`-m reject-all` disposes of REAL pending runs, not only stale ones.** List first, always. There is
+  no undo: rejecting a gate completes its build as `failed`.
+- **`manage-pipelines.sh` CLONES an existing definition and cannot retarget the repository.** To create
+  a definition for a different repo, use `az pipelines create` (see `az-pipelines-ops`). The clone path
+  silently points the new definition at the template's repo, where a same-named YAML file makes it run,
+  pass, and report green while testing something else.
+- `restart-stack.sh` is reached via `sudo` and is authorized for agents; it is for a wedged agent, not
+  for lease recovery.
+
 ## Step 1: Gather the agent-side evidence
 
 `az-pipelines-ops` Step 3 is REST-only and deliberately does not touch the agent host. The
@@ -135,5 +161,10 @@ Not a failure class the build reports, and the one worth checking when a result 
   running** build whose lease you were about to force. The two read as contradictory only if the
   subject is dropped, so the subject is stated in both.
 - **Do not disable GPU coverage** to avoid an OOM. Confirm the phase split and fixture retention first.
+- **Do not `manage-approvals.sh -m reject-all` without listing first.** It disposes of genuinely
+  pending runs alongside stale ones, and a rejected gate completes its build as `failed` with no undo.
+- **Do not register a definition for a different repo by cloning one.** `manage-pipelines.sh` copies
+  the template's repository block wholesale and has no flag to retarget it, so the result runs green
+  against the wrong repository. Use `az pipelines create`.
 - **Do not put build numbers or run URLs** in commit messages or code comments. They identify a log
   that expires. Describe the environment shape and the symptom.
