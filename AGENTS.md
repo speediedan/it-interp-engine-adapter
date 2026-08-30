@@ -111,6 +111,20 @@ Both jobs currently pin `interpretune @ git+...@fix/declare-jsonschema-dep` rath
 Three call sites, flipped together when speediedan/interpretune#404 merges; the workflow comments
 carry the condition.
 
+## GPU work must be wrapped by hand
+
+**This repo has no lease-aware test harness.** Some sibling repos carry one that self re-execs under
+the host GPU lease, so a single acquisition covers a whole suite. Nothing here does, so every
+GPU-touching command must be wrapped explicitly:
+
+```bash
+export GPU_LEASE_CMD=/path/to/gpu_lease.sh   # opt-in; a no-op when unset
+$GPU_LEASE_CMD -- <cmd>
+```
+
+This matters less than it sounds today, because the suite is CPU-only and no test in it touches a
+device. It matters the moment one does. See the `gpu-lease` skill for planning and recovery.
+
 ## Code style
 
 120-char lines, ruff `E`/`W`/`F` with `E731`/`F722` ignored for jaxtyping compatibility, McCabe max 10,
