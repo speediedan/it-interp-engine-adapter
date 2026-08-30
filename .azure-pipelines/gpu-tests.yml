@@ -132,7 +132,7 @@ jobs:
           # eagerly even though this adapter uses neither (speediedan/interpretune#401).
           uv pip install -e ".[test]" \
             "transformer-lens>=3.5.1,<4" "sae_lens>=6.49.0" \
-            "interpretune @ git+https://github.com/speediedan/interpretune.git@fix/declare-jsonschema-dep"
+            "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
           echo "=== resolved, and from WHERE (a version string would not show a second torch) ==="
           python -c "import torch, interpretune, interp_engine_adapter as a; print(torch.__file__); print(interpretune.__file__); print(a.__file__)"
         displayName: "Install"
