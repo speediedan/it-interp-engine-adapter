@@ -124,10 +124,6 @@ jobs:
           # CPU variant would silently make every GPU assertion below vacuous.
           uv --version
           #
-          # TEMPORARY: tracks interpretune's fix branch; a bare install of main cannot be imported until
-          # speediedan/interpretune#404 merges. This is the THIRD call site of that pin (the other two
-          # are in ci.yml); flip all three together and drop this comment.
-          #
           # transformer-lens + sae-lens are hand-carried because interpretune's core config imports both
           # eagerly even though this adapter uses neither (speediedan/interpretune#401).
           uv pip install -e ".[test]" \
