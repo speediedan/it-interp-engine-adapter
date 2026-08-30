@@ -7,7 +7,7 @@ license: Apache-2.0
 # Debugging remote CI failures
 
 Covers the GitHub Actions workflow only. For the shared self-hosted Azure agent, use the
-`az-pipelines-debug` skill.
+`az-pipelines-ops` skill (operational) and `az-pipelines-failure-triage` (this repo's half).
 
 Adapted from the interpretune skill of the same name. **Most of that skill does not apply here** and
 was dropped rather than carried: this repo has one workflow, two jobs, no OS matrix, no Windows or

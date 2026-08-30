@@ -158,7 +158,15 @@ pre-commit run --all-files
 
 ## Skills
 
-`.claude/skills/` carries `gpu-lease`, `az-pipelines-debug` and `debug-remote-ci-failures`. The first
-two are shared near-verbatim with `interpretune` and `finetuning-scheduler` and are deliberately
-**host-independent**: real host values live in the maintainer's private `CLAUDE.local.md`, not here.
-Keep them that way, so the shared copies stay diffable.
+`.claude/skills/` carries four skills, and the distinction between them matters:
+
+- **`gpu-lease`** and **`az-pipelines-ops`** are VENDORED from `speediedan/skills` and are byte-identical
+  across this repo, `interpretune` and `finetuning-scheduler`. **Do not edit them here.** A local edit is
+  discarded by the next `sync-shared-skills.sh push`, and a pre-commit hook refuses the commit to say so.
+  Fix them upstream, then take the push.
+- **`az-pipelines-failure-triage`** and **`debug-remote-ci-failures`** are this repo's own. The first is
+  the repo-specific half of the Azure skill and points at `az-pipelines-ops` for anything operational;
+  the second is deliberately forked in all three repos, because the shared content measured near zero.
+
+The vendored pair are host-independent by construction: real host values live in the maintainer's
+private `CLAUDE.local.md`, which is what keeps the copies diffable.

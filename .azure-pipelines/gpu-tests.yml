@@ -91,7 +91,7 @@ jobs:
       # Serialize against local GPU work on this host. The agent runs one job at a time, so this guards
       # only against interactive/agent sessions and the sibling projects' suites. Waiting here for tens
       # of minutes is the system working, not a hung build: do not cancel, and never force-reset the
-      # lease from the host side. See the `gpu-lease` and `az-pipelines-debug` skills.
+      # lease from the host side. See the `gpu-lease` and `az-pipelines-ops` skills.
       - bash: |
           source scripts/gpu_lease_wrap.sh
           ci_gpu_lease_acquire /gpu_leases /tmp/azp_gpu_lease.pid 2400 "azure-iea-$(Build.BuildId)"
