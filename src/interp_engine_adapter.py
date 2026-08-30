@@ -25,14 +25,11 @@ tensor the caller probably meant. Substituting silently is exactly how this defe
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from interpretune.adapters.registration import CompositionRegistry
 from interpretune.base import CoreHelperAttributes, BaseITModule
 from interpretune.protocol import Adapter
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    import torch
 
 
 ADAPTER_NAME = "interp_engine"
@@ -132,7 +129,10 @@ class _Seam:
 
     @staticmethod
     def wrap_model(model: Any, tokenizer: Any, cfg: InterpEngineConfig, model_id: str) -> Any:
-        """Wrap an ALREADY-LOADED HF model in place. No reload, no second copy."""
+        """Wrap an ALREADY-LOADED HF model in place.
+
+        No reload, no second copy.
+        """
         from interp_engine import EagerModel
 
         kwargs: dict[str, Any] = dict(cfg.model_kwargs)
@@ -221,7 +221,10 @@ class InterpEngineModule(InterpEngineCaptureMixin, CoreHelperAttributes, BaseInt
 
 
 class InterpEngineAdapter:
-    """Registers this adapter's compositions. Discovered by the rails via ``register_adapter_ctx``."""
+    """Registers this adapter's compositions.
+
+    Discovered by the rails via ``register_adapter_ctx``.
+    """
 
     @classmethod
     def register_adapter_ctx(cls, adapter_ctx_registry: CompositionRegistry) -> None:

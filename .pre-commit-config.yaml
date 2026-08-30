@@ -1,0 +1,43 @@
+# Mirrors interpretune's hook set, minus the hooks that exist for surfaces this repo does not have
+# (notebooks, benchmark registry, docs artifacts). Ruff's own configuration lives in pyproject.toml,
+# so the CLI and this hook cannot disagree.
+#
+# NOTE: there is deliberately no `ci:` block. That block configures pre-commit.ci, a hosted app that
+# is not installed on this repo -- it would read as though a remote gate existed when none does.
+
+default_language_version:
+  python: python3
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      - id: check-case-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=350', '--enforce-all']
+      # This component is loaded as remote code in a consumer's process, so a key reaching the
+      # published repo is a materially worse outcome here than in an ordinary library.
+      - id: detect-private-key
+
+  - repo: https://github.com/myint/docformatter
+    rev: v1.7.7
+    hooks:
+      - id: docformatter
+        args: [--in-place, --wrap-summaries=115, --wrap-descriptions=120]
+
+  - repo: https://github.com/asottile/yesqa
+    rev: v1.5.0
+    hooks:
+      - id: yesqa
+        name: Unused noqa
+
+  - repo: https://github.com/charliermarsh/ruff-pre-commit
+    rev: 'v0.12.10'
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format

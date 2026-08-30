@@ -1,4 +1,0 @@
-interp-engine~=1.3.0
-
-[test]
-pytest

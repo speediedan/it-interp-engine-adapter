@@ -2,7 +2,7 @@ it_schema_version: 1
 kinds: [adapters]
 
 adapters:
-  entrypoint: interp_engine_adapter.py
+  entrypoint: src/interp_engine_adapter.py
   declares: [interp_engine]
   compositions:
     - component: module
