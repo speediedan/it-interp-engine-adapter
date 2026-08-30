@@ -4,12 +4,21 @@ name: tests
 # fixture adapter and carries one optional contract test against the published component; it does
 # not test this adapter's behaviour, so an interp-engine release that moves a signature turns this
 # repo red rather than a framework nobody expects to break.
+#
+# Two jobs, as a model for hub-component CI:
+#   cpu — hosted runner, every push/PR. Interpretune is installed from its GitHub source repo
+#         (it is pre-MVP and not on PyPI); uv is used so a future consumer inheriting
+#         interpretune's [tool.uv] override workflow stays a one-line change.
+#   gpu — manual dispatch on a self-hosted runner carrying the `gpu` label. Hub contributors with
+#         GPU hardware register a runner and dispatch this to exercise device-dependent paths;
+#         without such a runner the job simply never runs and never blocks a merge.
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  test:
+  cpu:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,8 +27,26 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: |
-          python -m pip install --upgrade pip
-          # The pinned engine line, and interpretune for the registration surface the entrypoint uses.
-          pip install -e ".[test]" interpretune
+          python -m pip install --upgrade pip uv
+          # The pinned engine line, plus interpretune (from source; not yet on PyPI) for the
+          # registration surface the entrypoint uses. CPU torch keeps the hosted runner light.
+          uv pip install --system --torch-backend=cpu -e ".[test]" \
+            "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
       - name: Test
         run: pytest -v
+
+  gpu:
+    # Runs only when dispatched, and only on a self-hosted runner labelled `gpu`.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip uv
+          uv pip install --system -e ".[test]" \
+            "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
+      - name: Test (GPU)
+        run: |
+          nvidia-smi
+          IT_RUN_CUDA_TESTS=1 pytest -v
