@@ -124,15 +124,11 @@ jobs:
           # CPU variant would silently make every GPU assertion below vacuous.
           uv --version
           #
-          # TEMPORARY: tracks interpretune's fix branch; a bare install of main cannot be imported until
-          # speediedan/interpretune#404 merges. This is the THIRD call site of that pin (the other two
-          # are in ci.yml); flip all three together and drop this comment.
-          #
           # transformer-lens + sae-lens are hand-carried because interpretune's core config imports both
           # eagerly even though this adapter uses neither (speediedan/interpretune#401).
           uv pip install -e ".[test]" \
             "transformer-lens>=3.5.1,<4" "sae_lens>=6.49.0" \
-            "interpretune @ git+https://github.com/speediedan/interpretune.git@fix/declare-jsonschema-dep"
+            "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
           echo "=== resolved, and from WHERE (a version string would not show a second torch) ==="
           python -c "import torch, interpretune, interp_engine_adapter as a; print(torch.__file__); print(interpretune.__file__); print(a.__file__)"
         displayName: "Install"
@@ -159,6 +155,26 @@ jobs:
           echo "full collection: ${collected}"
           IT_RUN_CUDA_TESTS=1 python -m pytest -v --durations=25
         displayName: "Test (GPU)"
+
+      # WORKSPACE OWNERSHIP, and it must run INSIDE the container, where this uid can still write.
+      # Under rootless docker with userns remapping, everything this job writes into the mapped
+      # workspace is owned by the container's host subuid, not by the agent. The agent's next build
+      # begins with `git clean -ffdx` / `git reset --hard` as ITSELF, cannot remove those files, and
+      # falls back to deleting the source folder, which fails the same way -- so the checkout task
+      # fails before any step of ours runs and every subsequent build fails identically until someone
+      # with privileges clears the folder by hand. `.pytest_cache` is the only directory in this
+      # category today; the chmod covers anything else the run leaves behind.
+      #
+      # Measured here: a build failed at `Checkout ... to s` in 22s with
+      # `System.UnauthorizedAccessException: Access to the path '.../s/.pytest_cache/v/cache/nodeids'
+      # is denied`, left by the previous green run. Interpretune's own pipeline carries the same step
+      # for the same reason; this is that fix, not a new idea.
+      - bash: |
+          sudo chmod -R 775 "$(Build.SourcesDirectory)" || true
+          sudo rm -rf "$(Build.SourcesDirectory)/.pytest_cache" || true
+          echo "workspace ownership normalized for the next build"
+        displayName: "Normalize workspace ownership"
+        condition: always()
 
       # `always()` so a failed or cancelled build still releases. Container teardown would free the
       # flock regardless (the kernel releases the fd when the holder dies), but the holder METADATA file
