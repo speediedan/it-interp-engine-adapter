@@ -74,9 +74,14 @@ pytest -v
 ```
 
 The suite needs `interpretune` importable. It is pre-MVP and not on PyPI, so it is installed from
-source; `transformer-lens` and `sae-lens` are hand-carried because interpretune's core config imports
-both eagerly even though this adapter uses neither (tracked in speediedan/interpretune#401). See
-`.github/workflows/ci.yml` for the exact install line.
+source; `transformer-lens` and `sae-lens` are hand-carried, and this adapter uses neither
+(speediedan/interpretune#401). **The reason is not that `interpretune.config` imports them**, which is
+what an earlier version of this line said: `interpretune.config` reaches the analysis stack, which
+imported `sae_lens` at module level for an annotation and annotated with `jaxtyping` without declaring
+it, while `transformer-lens` silently supplied `jaxtyping`. Both are fixed upstream, so the two lines
+become droppable once this repo tracks an interpretune carrying that fix. Drop them and let CI
+confirm rather than acting on this paragraph: the measurement behind it was taken in a different
+environment. `.github/workflows/ci.yml` carries the same note at the install line.
 
 **A local red naming a missing `interpretune` symbol is usually a stale environment, not a missing
 API.** `TestRegistration::test_registers_both_declared_compositions` needs `register_dynamic_adapter`,
@@ -93,8 +98,8 @@ The failure mode is specific and easy to walk into: on a machine that keeps an e
 checkout, both usual resolution paths reach the same shared working tree, so a branch someone else has
 checked out there becomes *your* interpretune. `env -u PYTHONPATH` does not save you: an editable
 install puts that tree on `sys.path` through `site-packages` regardless. Reproduce green with an
-interpretune installed from `main` (or the pinned fix branch until #404 merges); this repo's CI does
-exactly that, so a green CI run beside a local red is strong evidence the local env is the problem.
+interpretune installed from `main`; this repo's CI does exactly that, so a green CI run beside a local
+red is strong evidence the local env is the problem.
 
 ## CI
 
