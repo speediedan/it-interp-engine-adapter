@@ -107,9 +107,28 @@ exactly that, so a green CI run beside a local red is strong evidence the local 
   today. If it is ever pointed at real shared hardware it must take that host's GPU lease first, or it
   will contend silently with other suites. See the `gpu-lease` skill.
 
-Both jobs currently pin `interpretune @ git+...@fix/declare-jsonschema-dep` rather than `@main`.
-Three call sites, flipped together when speediedan/interpretune#404 merges; the workflow comments
-carry the condition.
+### The GPU gate is an Azure pipeline, not the `gpu` job above
+
+`.azure-pipelines/gpu-tests.yml`, registered as definition **4**
+(`speediedan.it-interp-engine-adapter.gpu`) in the **interpretune** Azure DevOps project. It runs in
+interpretune's container image on the self-hosted `Default` pool, takes the host GPU lease, and cleans
+up its own workspace so the next checkout can run. Operating it is `az-pipelines-ops`; classifying a
+failure is `az-pipelines-failure-triage`.
+
+**Cancel a queued build whose change cannot affect the result.** The pool has one agent, so a queued
+build holds a place other work waits in, and the job takes the host GPU lease when it runs. A
+comment-only or documentation change queues a build anyway, because `pr:` path filters match PATHS and
+this repo's filters include `.azure-pipelines/**` and `src/**`: a one-word comment fix inside the
+pipeline definition is indistinguishable to a filter from a rewrite of it. That judgement is the
+merger's, not the filter's, so do not add excludes to compensate.
+
+Declining to approve is **not** the same as cancelling: an unapproved build sits queued and its gate
+becomes a trap for a batch approval. Cancel it, and check again after merging, because the merge
+queues its own build for the same content. The `az-pipelines-ops` skill carries the command.
+
+Both workflows and the pipeline track `interpretune @ git+...@main`. `transformer-lens` and `sae-lens`
+are still hand-carried; the install-step comments carry the current reason and the condition for
+dropping them, which is upstream and measured rather than assumed.
 
 ## GPU work must be wrapped by hand
 
