@@ -29,6 +29,7 @@ from typing import Any
 
 from interpretune.adapters.registration import CompositionRegistry
 from interpretune.analysis.backends.capabilities import BackendCapability
+from interpretune.analysis.ops.base import get_batch_input
 from interpretune.base import CoreHelperAttributes, BaseITModule
 from interpretune.protocol import Adapter
 
@@ -199,15 +200,15 @@ class _Seam:
 
 
 def _tokens_from_batch(batch: dict[str, Any]) -> Any:
-    """Pull token ids out of an interpretune batch.
+    """Pull token ids out of an interpretune batch, using interpretune's own key resolution.
 
-    Interpretune batches are BatchEncoding-shaped; the engine takes token ids directly.
+    ``get_batch_input`` already handles the cross-backend key difference (TransformerLens ``input`` vs
+    HuggingFace/NNsight ``input_ids``) and is what the bundled circuit-tracer adapter uses. Duplicating
+    that logic here would diverge the moment interpretune recognises another key, and batch shapes are
+    interpretune's to define, not this component's to guess at. Verified importable in a venv holding
+    interpretune and interp-engine only: it pulls no framework.
     """
-    for key in ("input_ids", "input", "tokens"):
-        value = batch.get(key) if hasattr(batch, "get") else None
-        if value is not None:
-            return value
-    raise KeyError(f"no token ids on the batch (looked for input_ids/input/tokens, saw {list(batch)!r})")
+    return get_batch_input(batch)
 
 
 def _names_filter_to_list(names_filter: Any) -> list[str]:
@@ -228,12 +229,27 @@ def _names_filter_to_list(names_filter: Any) -> list[str]:
     return list(names_filter)
 
 
-def _intervention_targets(interventions: Any) -> list[tuple[int, str, Any]]:
-    """Yield ``(layer, engine point, spec)`` for each intervention, via the same seam capture uses."""
+def _intervention_targets(interventions: Any, model: Any) -> list[tuple[int, str, Any]]:
+    """Yield ``(layer, engine point, spec)`` for each intervention, via the same seam capture uses.
+
+    ``model`` is REQUIRED, and passing it is not a formality. ``tlens_hook_to_point`` accepts a null
+    model and silently returns the string-only reading, which differs on sandwich-norm architectures
+    for exactly ``hook_mlp_out``/``hook_attn_out`` (cos 0.109 / 0.221 on gemma-3-1b-it layer 5). Those
+    two are not in the alias table, so a model-blind call here would resolve them to the wrong point.
+    Steering is the worse direction to get this wrong in: capture at a wrong point returns a tensor you
+    might notice, while steering WRITES somewhere the caller did not name, the forward completes, and
+    the result looks plausible. That is this adapter's own defect class arriving through an optional
+    argument.
+    """
+    if model is None:
+        raise UnmappableHookError(
+            "a model is required to resolve intervention targets: hook translation is model-aware by "
+            "design, and the model-blind reading silently differs on sandwich-norm architectures."
+        )
     targets = []
     items = interventions.items() if hasattr(interventions, "items") else interventions
     for hook_name, specs in items:
-        address = _Seam.point_for(hook_name, None)
+        address = _Seam.point_for(hook_name, model)
         layer = getattr(address, "layer", None)
         if layer is None:
             raise UnmappableHookError(f"{hook_name!r} does not name a layer, so it cannot be steered")
@@ -377,7 +393,7 @@ class InterpEngineModelBackend:
         tokens = _tokens_from_batch(batch)
         specs = [
             _Seam.steer_spec(vector=spec.intervention_tensor, layer=layer, coeff=spec.scale_factor, point=point)
-            for layer, point, spec in _intervention_targets(interventions)
+            for layer, point, spec in _intervention_targets(interventions, model)
         ]
         pre = _Seam.forward(model, tokens)
         post = _Seam.steer(model, tokens, specs)

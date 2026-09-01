@@ -129,3 +129,41 @@ class TestModelBackend:
         backend = InterpEngineModelBackend()
         with pytest.raises(UnmappableHookError, match="callable names_filters"):
             backend.fwd_w_cache(None, {"input_ids": None}, lambda name: True)
+
+
+class TestInterventionTargetsAreModelAware:
+    """Steering must not resolve a hook name without the model.
+
+    `tlens_hook_to_point` ACCEPTS a null model and returns the string-only reading rather than
+    raising, and that reading differs on sandwich-norm architectures for exactly the block-level
+    `hook_mlp_out`/`hook_attn_out`. Those are not in the alias table, so a model-blind path would
+    resolve them to the wrong point and steering would WRITE there, silently.
+    """
+
+    def test_a_null_model_is_refused(self):
+        from interp_engine_adapter import UnmappableHookError, _intervention_targets
+
+        with pytest.raises(UnmappableHookError, match="a model is required"):
+            _intervention_targets({"blocks.5.hook_mlp_out": object()}, None)
+
+    def test_the_model_blind_reading_really_does_differ(self):
+        """Positive control for the refusal above, and the reason it exists.
+
+        If the engine ever started raising on a null model, or the alias table grew to cover these
+        names, the refusal would be guarding nothing -- and this test would say so by failing.
+        """
+        from interp_engine import tlens_hook_to_point
+
+        # These resolve WITHOUT a model, which is precisely the hazard.
+        for name, expected in (("blocks.5.hook_mlp_out", "mlp_out"), ("blocks.5.hook_attn_out", "attn_out")):
+            address = tlens_hook_to_point(name, None)
+            assert address.name == expected and address.layer == 5
+            assert name.split(".", 2)[2] not in _seam_alias_table(), (
+                f"{name} is now alias-resolved; revisit whether the model-aware requirement still binds"
+            )
+
+
+def _seam_alias_table() -> dict:
+    from interp_engine_adapter import _Seam
+
+    return _Seam._SUBLAYER_INPUT_ALIASES
