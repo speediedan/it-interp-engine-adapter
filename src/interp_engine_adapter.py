@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from interpretune.adapters.registration import CompositionRegistry
+from interpretune.analysis.backends.capabilities import BackendCapability
 from interpretune.base import CoreHelperAttributes, BaseITModule
 from interpretune.protocol import Adapter
 
@@ -159,6 +160,32 @@ class _Seam:
 
         return run_with_cache(engine_model, tokens, points, detach=detach)
 
+
+    @staticmethod
+    def steer(engine_model: Any, tokens: Any, specs: list[Any]) -> Any:
+        """Run one forward pass with steering applied, returning logits.
+
+        ``steer`` is a CONTEXT MANAGER yielding a hook manager, not a call, so the forward has to
+        happen inside it. Keeping that shape here rather than in the backend is the point of the seam:
+        if the engine changes how steering is entered, exactly one method moves.
+        """
+        from interp_engine import steer
+
+        with steer(engine_model, specs):
+            return engine_model.forward(tokens)
+
+    @staticmethod
+    def steer_spec(vector: Any, layer: int, coeff: float = 1.0, method: str = "additive", point: str = "resid_post") -> Any:
+        """Build one engine ``SteerSpec``."""
+        from interp_engine import SteerSpec
+
+        return SteerSpec(vector=vector, layer=layer, coeff=coeff, method=method, point=point)
+
+    @staticmethod
+    def forward(engine_model: Any, tokens: Any) -> Any:
+        """A plain forward pass, no capture and no steering."""
+        return engine_model.forward(tokens)
+
     @staticmethod
     def capabilities() -> Any:
         """The engine's capability set, readable before warmup.
@@ -169,6 +196,50 @@ class _Seam:
         from interp_engine import CAPABILITIES
 
         return CAPABILITIES
+
+
+def _tokens_from_batch(batch: dict[str, Any]) -> Any:
+    """Pull token ids out of an interpretune batch.
+
+    Interpretune batches are BatchEncoding-shaped; the engine takes token ids directly.
+    """
+    for key in ("input_ids", "input", "tokens"):
+        value = batch.get(key) if hasattr(batch, "get") else None
+        if value is not None:
+            return value
+    raise KeyError(f"no token ids on the batch (looked for input_ids/input/tokens, saw {list(batch)!r})")
+
+
+def _names_filter_to_list(names_filter: Any) -> list[str]:
+    """Normalize interpretune's ``NamesFilter`` to a concrete list of hook names.
+
+    A CALLABLE filter cannot be enumerated without the model's hook inventory, which the engine does
+    not expose as TransformerLens names, so it is refused rather than silently under-capturing.
+    """
+    if names_filter is None:
+        raise UnmappableHookError("a names_filter is required: this backend cannot capture 'everything'")
+    if isinstance(names_filter, str):
+        return [names_filter]
+    if callable(names_filter):
+        raise UnmappableHookError(
+            "callable names_filters are not supported by this backend: it cannot enumerate the model's "
+            "hook inventory in TransformerLens vocabulary. Pass an explicit list of hook names."
+        )
+    return list(names_filter)
+
+
+def _intervention_targets(interventions: Any) -> list[tuple[int, str, Any]]:
+    """Yield ``(layer, engine point, spec)`` for each intervention, via the same seam capture uses."""
+    targets = []
+    items = interventions.items() if hasattr(interventions, "items") else interventions
+    for hook_name, specs in items:
+        address = _Seam.point_for(hook_name, None)
+        layer = getattr(address, "layer", None)
+        if layer is None:
+            raise UnmappableHookError(f"{hook_name!r} does not name a layer, so it cannot be steered")
+        for spec in (specs if isinstance(specs, (list, tuple)) else [specs]):
+            targets.append((layer, getattr(address, "name", "resid_post"), spec))
+    return targets
 
 
 class InterpEngineAttributeMixin:
@@ -198,6 +269,10 @@ class InterpEngineCaptureMixin(InterpEngineAttributeMixin):
         """
         result = super().post_auto_model_init(*args, **kwargs)  # type: ignore[misc]
         model_id = getattr(getattr(self, "it_cfg", None), "model_name_or_path", "") or ""
+        # Attach the model backend the way bundled adapters do (`self._model_backend`). There is no
+        # model-backend REGISTRY to register into -- backends are adapter-attached by construction --
+        # so a hub adapter reaches this seam exactly as a bundled one does.
+        self._model_backend = InterpEngineModelBackend()
         self._engine_model = _Seam.wrap_model(
             self.model,  # type: ignore[attr-defined]
             getattr(self, "tokenizer", None),
@@ -218,6 +293,95 @@ class BaseInterpEngineModule(BaseITModule):
 
 class InterpEngineModule(InterpEngineCaptureMixin, CoreHelperAttributes, BaseInterpEngineModule):
     """The ``(core, interp_engine)`` module composition."""
+
+
+class InterpEngineModelBackend:
+    """The engine as an interpretune ``ModelBackend``: required core plus ``INTERVENTION``.
+
+    Interpretune's ``ModelBackend`` was decomposed into a required core and capability-gated method
+    groups precisely so a component like this one can implement what it actually does and SAY so
+    (interpretune R1, #401). This implements:
+
+      * ``ModelBackendCore`` -- ``fwd``, ``fwd_w_cache``, ``wrap_activation_cache``, and the capability
+        introspection ops gate on.
+      * ``SupportsIntervention`` -- ``fwd_w_intervention``, via the engine's steering.
+
+    and deliberately NOT ``SupportsLatentModels`` or ``SupportsGradients``: the eager tier has no
+    SAE-attachment design and this adapter does not claim a gradient surface. An op that needs either
+    now fails at ``require_backend_capability`` with a message naming the op, the missing capability
+    and what this backend does claim -- rather than as an ``AttributeError`` somewhere inside the op.
+
+    Every engine symbol goes through ``_Seam``, like the rest of this file; interpretune symbols are
+    imported at module level, since those are the framework this component extends rather than the
+    dependency it insulates against.
+    """
+
+    @property
+    def capabilities(self) -> frozenset[Any]:
+        return frozenset({BackendCapability.INTERVENTION})
+
+    def supports(self, capability: Any) -> bool:
+        # Compare by VALUE: interpretune's own gate does, because a suite can load the capabilities
+        # module twice and leave value-equal, identity-distinct members on either side.
+        supported = {getattr(c, "value", c) for c in self.capabilities}
+        return getattr(capability, "value", capability) in supported
+
+    # -- ModelBackendCore ---------------------------------------------------------------------
+
+    def fwd(self, model: Any, batch: dict[str, Any]) -> Any:
+        return _Seam.forward(model, _tokens_from_batch(batch))
+
+    def fwd_w_cache(self, model: Any, batch: dict[str, Any], names_filter: Any) -> tuple[Any, Any]:
+        """Forward with activation caching, at TransformerLens hook names.
+
+        ``names_filter`` is interpretune's vocabulary; the seam translates each name to an engine
+        address and REFUSES the ambiguous ones rather than guessing, which is the behaviour this
+        adapter exists to get right.
+        """
+        hook_names = _names_filter_to_list(names_filter)
+        points = [_Seam.point_for(name, model) for name in hook_names]
+        cache = _Seam.capture(model, _tokens_from_batch(batch), points)
+        by_hook = {name: cache[point] for name, point in zip(hook_names, points)}
+        return getattr(cache, "logits", None), self.wrap_activation_cache(by_hook, model)
+
+    def wrap_activation_cache(self, cache_dict: dict[str, Any], model: Any) -> Any:
+        """Return the mapping as-is.
+
+        The protocol permits this: it asks for "a cache object suitable for indexed access by hook
+        name", and a dict already is one. Wrapping in a TransformerLens ``ActivationCache`` would make
+        this adapter depend on TransformerLens, which is exactly the coupling it avoids.
+        """
+        return cache_dict
+
+    # -- SupportsIntervention -----------------------------------------------------------------
+
+    def fwd_w_intervention(
+        self,
+        model: Any,
+        batch: dict[str, Any],
+        interventions: Any,
+        latent_model_handles: list[Any] | None = None,
+    ) -> tuple[Any, Any]:
+        """Baseline and steered logits, from the engine's steering surface.
+
+        ``latent_model_handles`` is refused rather than ignored: this backend does not claim
+        ``LATENT_MODELS``, so accepting handles and silently dropping them would produce a result that
+        looks like an intervention over latents and is not.
+        """
+        if latent_model_handles:
+            raise UnmappableHookError(
+                "this backend does not support latent-model handles (it claims INTERVENTION but not "
+                "LATENT_MODELS); attach latents through a backend that does, rather than having them "
+                "silently ignored here."
+            )
+        tokens = _tokens_from_batch(batch)
+        specs = [
+            _Seam.steer_spec(vector=spec.intervention_tensor, layer=layer, coeff=spec.scale_factor, point=point)
+            for layer, point, spec in _intervention_targets(interventions)
+        ]
+        pre = _Seam.forward(model, tokens)
+        post = _Seam.steer(model, tokens, specs)
+        return pre, post
 
 
 class InterpEngineAdapter:
