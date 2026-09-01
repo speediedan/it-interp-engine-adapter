@@ -31,9 +31,16 @@ jobs:
           # The pinned engine line, plus interpretune (from source; not yet on PyPI) for the
           # registration surface the entrypoint uses. CPU torch keeps the hosted runner light.
           #
-          # transformer-lens + sae-lens: interpretune's core config imports both eagerly even
-          # though this adapter uses neither -- measured evidence for the restructure tracked in
-          # speediedan/interpretune#401. Drop them when that lands.
+          # transformer-lens + sae-lens are hand-carried, and the reason is NOT the one an earlier
+          # version of this comment gave. `import interpretune.config` reaches the analysis stack, which
+          # until interpretune#401's follow-up imported sae_lens at module level for an annotation and
+          # annotated with jaxtyping without declaring it -- and transformer-lens was silently supplying
+          # jaxtyping. Both are fixed upstream; measured there against a venv holding interpretune and
+          # nothing else, the full adapter surface now imports with zero frameworks installed.
+          #
+          # SO THESE TWO LINES ARE NOW DROPPABLE, once this repo tracks an interpretune carrying that
+          # fix. Drop them and let CI confirm, rather than dropping them on this comment's say-so: this
+          # environment is not the one the upstream measurement was taken in.
           uv pip install --system --torch-backend=cpu -e ".[test]" \
             "transformer-lens>=3.5.1,<4" "sae_lens>=6.49.0" \
             "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
