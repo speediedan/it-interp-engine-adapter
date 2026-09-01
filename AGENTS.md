@@ -74,14 +74,13 @@ pytest -v
 ```
 
 The suite needs `interpretune` importable. It is pre-MVP and not on PyPI, so it is installed from
-source; `transformer-lens` and `sae-lens` are hand-carried, and this adapter uses neither
-(speediedan/interpretune#401). **The reason is not that `interpretune.config` imports them**, which is
-what an earlier version of this line said: `interpretune.config` reaches the analysis stack, which
-imported `sae_lens` at module level for an annotation and annotated with `jaxtyping` without declaring
-it, while `transformer-lens` silently supplied `jaxtyping`. Both are fixed upstream, so the two lines
-become droppable once this repo tracks an interpretune carrying that fix. Drop them and let CI
-confirm rather than acting on this paragraph: the measurement behind it was taken in a different
-environment. `.github/workflows/ci.yml` carries the same note at the install line.
+source. **Nothing else is hand-carried any more.** `transformer-lens` and `sae-lens` were carried
+until speediedan/interpretune#401's follow-up (merged as `c3423a5`), because `interpretune.config`
+reaches the analysis stack, which imported `sae_lens` at module level for an annotation and annotated
+with `jaxtyping` without declaring it, while `transformer-lens` silently supplied that `jaxtyping`.
+That masking is why the pair had to go together and why no environment inside this repo could have
+revealed it. If a future interpretune reintroduces an undeclared import, CI here now fails at import
+rather than being masked by a pin, which is the outcome worth having.
 
 **A local red naming a missing `interpretune` symbol is usually a stale environment, not a missing
 API.** `TestRegistration::test_registers_both_declared_compositions` needs `register_dynamic_adapter`,
@@ -131,9 +130,8 @@ Declining to approve is **not** the same as cancelling: an unapproved build sits
 becomes a trap for a batch approval. Cancel it, and check again after merging, because the merge
 queues its own build for the same content. The `az-pipelines-ops` skill carries the command.
 
-Both workflows and the pipeline track `interpretune @ git+...@main`. `transformer-lens` and `sae-lens`
-are still hand-carried; the install-step comments carry the current reason and the condition for
-dropping them, which is upstream and measured rather than assumed.
+Both workflows and the pipeline track `interpretune @ git+...@main` and install nothing else by hand;
+see Testing for why the two framework pins were removed.
 
 ## GPU work must be wrapped by hand
 
