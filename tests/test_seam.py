@@ -83,3 +83,49 @@ class TestRegistration:
         assert len(keys) == 2, f"expected the two declared compositions, got {keys}"
         for key in keys:
             assert registry.get(key) == (InterpEngineModule,)
+
+
+class TestModelBackend:
+    """The backend claims exactly what it implements, and refuses what it does not."""
+
+    def test_claims_intervention_and_nothing_else(self):
+        from interpretune.analysis.backends.capabilities import BackendCapability
+        from interp_engine_adapter import InterpEngineModelBackend
+
+        backend = InterpEngineModelBackend()
+        assert backend.supports(BackendCapability.INTERVENTION)
+        for absent in (BackendCapability.LATENT_MODELS, BackendCapability.GRADIENTS, BackendCapability.BATCHED_HOOKS):
+            assert not backend.supports(absent)
+
+    def test_satisfies_core_and_intervention_protocols_only(self):
+        from interpretune.analysis.backends.protocols import (
+            ModelBackend,
+            ModelBackendCore,
+            SupportsGradients,
+            SupportsIntervention,
+            SupportsLatentModels,
+        )
+        from interp_engine_adapter import InterpEngineModelBackend
+
+        backend = InterpEngineModelBackend()
+        assert isinstance(backend, ModelBackendCore)
+        assert isinstance(backend, SupportsIntervention)
+        # The point of the decomposition: a partial backend is NOT the full protocol, and structural
+        # checks say so rather than the mismatch surfacing as an AttributeError inside an op.
+        assert not isinstance(backend, SupportsLatentModels)
+        assert not isinstance(backend, SupportsGradients)
+        assert not isinstance(backend, ModelBackend)
+
+    def test_latent_handles_are_refused_not_ignored(self):
+        from interp_engine_adapter import InterpEngineModelBackend, UnmappableHookError
+
+        backend = InterpEngineModelBackend()
+        with pytest.raises(UnmappableHookError, match="does not support latent-model handles"):
+            backend.fwd_w_intervention(None, {"input_ids": None}, {}, latent_model_handles=[object()])
+
+    def test_a_callable_names_filter_is_refused_rather_than_under_capturing(self):
+        from interp_engine_adapter import InterpEngineModelBackend, UnmappableHookError
+
+        backend = InterpEngineModelBackend()
+        with pytest.raises(UnmappableHookError, match="callable names_filters"):
+            backend.fwd_w_cache(None, {"input_ids": None}, lambda name: True)
