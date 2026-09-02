@@ -161,7 +161,6 @@ class _Seam:
 
         return run_with_cache(engine_model, tokens, points, detach=detach)
 
-
     @staticmethod
     def steer(engine_model: Any, tokens: Any, specs: list[Any]) -> Any:
         """Run one forward pass with steering applied, returning logits.
@@ -176,7 +175,9 @@ class _Seam:
             return engine_model.forward(tokens)
 
     @staticmethod
-    def steer_spec(vector: Any, layer: int, coeff: float = 1.0, method: str = "additive", point: str = "resid_post") -> Any:
+    def steer_spec(
+        vector: Any, layer: int, coeff: float = 1.0, method: str = "additive", point: str = "resid_post"
+    ) -> Any:
         """Build one engine ``SteerSpec``."""
         from interp_engine import SteerSpec
 
@@ -214,8 +215,8 @@ def _tokens_from_batch(batch: dict[str, Any]) -> Any:
 def _names_filter_to_list(names_filter: Any) -> list[str]:
     """Normalize interpretune's ``NamesFilter`` to a concrete list of hook names.
 
-    A CALLABLE filter cannot be enumerated without the model's hook inventory, which the engine does
-    not expose as TransformerLens names, so it is refused rather than silently under-capturing.
+    A CALLABLE filter cannot be enumerated without the model's hook inventory, which the engine does not expose as
+    TransformerLens names, so it is refused rather than silently under-capturing.
     """
     if names_filter is None:
         raise UnmappableHookError("a names_filter is required: this backend cannot capture 'everything'")
@@ -275,7 +276,6 @@ _MODE_TO_STEER_METHOD = {"add": "additive"}
 _REJECT_SPAN_CAVEAT = "rank-1 per spec; span operations need orthonormal rows"
 
 
-
 def _steer_method_for(mode: str) -> str:
     """Translate an intervention mode, refusing the ones this backend cannot express faithfully."""
     method = _MODE_TO_STEER_METHOD.get(mode)
@@ -289,6 +289,7 @@ def _steer_method_for(mode: str) -> str:
             "wrong mode would complete and return plausible logits for an intervention nobody asked for."
         )
     return method
+
 
 def _require_expressible_operand(tensor: Any, hook_name: str) -> Any:
     """Refuse a span operand, because the engine's projector is rank-one and additive BROADCASTS.
@@ -341,6 +342,7 @@ def _require_expressible_operand(tensor: Any, hook_name: str) -> Any:
         )
     return tensor
 
+
 def _intervention_targets(interventions: Any, model: Any) -> list[tuple[int, str, Any]]:
     """Yield ``(layer, engine point, spec)`` for each intervention, via the same seam capture uses.
 
@@ -365,7 +367,7 @@ def _intervention_targets(interventions: Any, model: Any) -> list[tuple[int, str
         layer = getattr(address, "layer", None)
         if layer is None:
             raise UnmappableHookError(f"{hook_name!r} does not name a layer, so it cannot be steered")
-        for spec in (specs if isinstance(specs, (list, tuple)) else [specs]):
+        for spec in specs if isinstance(specs, (list, tuple)) else [specs]:
             targets.append((layer, getattr(address, "name", "resid_post"), spec))
     return targets
 
