@@ -299,17 +299,29 @@ def _require_expressible_operand(tensor: Any, hook_name: str) -> Any:
 
     * ``orthogonal``/``projection_cap`` raise, but with a tensor-size message naming neither the span
       nor the rank-one projector, so the caller learns nothing about the actual constraint.
-    * ``additive`` does NOT reliably raise, and WHICH BEHAVIOUR YOU GET DEPENDS ON THE PROMPT, not on
-      the code. Measured across ``k`` and sequence length, the delta is accepted silently exactly when
-      ``k == 1`` (the intended single-direction case), when ``k == seq_len`` (broadcast per POSITION --
-      a different vector at each token, no span semantics anywhere in it), or when ``seq_len == 1``
-      (the output SHAPE GROWS to ``(1, k, d_model)``). Every other combination raises.
+    * ``additive`` does NOT reliably raise, and the silent set has a general form worth stating instead
+      of an enumeration: **it is exactly torch's BROADCAST-COMPATIBLE set** -- ``k == 1``, or
+      ``seq_len == 1``, or ``k == seq_len``. Verified as an exact match across ``k, seq in 1..6``.
 
-      So the same call site is safe with a 3-token prompt and silently wrong with a 5-token one. **The
-      engine's validation here is not absent, it is INTERMITTENT, and intermittent validation is worse
-      than none: it trains the caller to expect an error that will not always come.** That is the
-      argument for a guard rather than a test -- a test fixes one prompt length and can only establish
-      that THAT length is not the bad one, never the absence of the bug.
+      Two of those three branches are wrong, and they are wrong differently:
+
+        ``k == seq_len``   the shape is PRESERVED and the values are corrupted: a different vector is
+                           applied at each position, with no span semantics anywhere in the result.
+        ``seq_len == 1``   worse. The SEQUENCE AXIS IS REPLACED by ``k``: a 1-token prompt steered with
+                           a 3-row span yields ``(1, 3, d_model)``, which flows downstream as though
+                           the prompt had three tokens. And ``seq_len == 1`` is not exotic -- it is a
+                           single-token prompt, and every step of incremental decoding, so the case
+                           most likely to be hit in generation is the one that fails worst.
+
+      This is why it can never be caught reliably downstream: **broadcasting is designed to succeed
+      silently, so the engine is not failing to validate so much as inheriting a rule whose entire
+      purpose is to not raise.** Refusing ``ndim > 1`` here is therefore not defensive coding against a
+      list of known cases; it is the only way to leave the broadcast rule's domain, and it predicts
+      cases rather than enumerating them.
+
+      It also means the behaviour is DATA-DEPENDENT: the same call site is safe with a 4-token prompt
+      and silently wrong with a 3-row span at 3 tokens. A test fixing one prompt length can only
+      establish that THAT length is not the bad one, which is the argument for a guard over a test.
 
     A caller wanting a span operation composes per-row specs, which reproduces ``h - V V^+ h`` only for
     ORTHONORMAL rows (measured exact for orthonormal ``V``, wrong at row cosine -0.240). Orthonormalizing

@@ -317,16 +317,37 @@ class TestSpanOperandsAreRefused:
         from interp_engine.steer import steer_delta
 
         d = 8
-        silent, loud = [], []
-        for k in (3, 4, 5):
-            for seq in (3, 4, 5):
+
+        def broadcast_compatible(k: int, seq: int) -> bool:
+            return k == 1 or seq == 1 or k == seq
+
+        for seq in range(1, 7):
+            for k in range(1, 7):
                 h = torch.randn(1, seq, d)
                 V = torch.randn(k, d)
                 try:
-                    out = h + steer_delta(SteerSpec(vector=V, layer=0, coeff=1.0, method="additive"), h, V)
-                    (silent if out.shape == h.shape else loud).append((k, seq))
+                    h + steer_delta(SteerSpec(vector=V, layer=0, coeff=1.0, method="additive"), h, V)
+                    silent = True
                 except Exception:
-                    loud.append((k, seq))
-        # silent exactly on the diagonal: the hazard is k == seq_len, i.e. a property of the prompt
-        assert silent == [(k, k) for k in (3, 4, 5)], f"silent window moved: {silent}"
-        assert loud, "nothing raised at all; the 'intermittent' framing no longer holds"
+                    silent = False
+                assert silent == broadcast_compatible(k, seq), (
+                    f"the silent set is no longer torch's broadcast-compatible set at k={k}, seq={seq}; "
+                    "the guard's justification should be revisited rather than left asserting a rule "
+                    "that has changed"
+                )
+
+    def test_the_worst_case_replaces_the_sequence_axis(self):
+        """seq_len == 1 does not merely corrupt values, it changes the prompt's length.
+
+        A 1-token prompt steered with a k-row span yields a k-POSITION activation, which flows
+        downstream as though the prompt had k tokens. seq_len == 1 is every step of incremental
+        decoding, so the case most likely to be hit in generation is the one that fails worst.
+        """
+        import torch
+        from interp_engine import SteerSpec
+        from interp_engine.steer import steer_delta
+
+        h = torch.randn(1, 1, 8)
+        V = torch.randn(3, 8)
+        out = h + steer_delta(SteerSpec(vector=V, layer=0, coeff=1.0, method="additive"), h, V)
+        assert out.shape[1] == 3 and h.shape[1] == 1, "the sequence-axis replacement no longer occurs"
