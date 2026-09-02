@@ -276,3 +276,46 @@ class TestTheProjectOrthogonalBoundaryIsGuardedByCode:
 
         with pytest.raises(UnmappableHookError):
             _steer_method_for("project")
+
+
+class TestSpanOperandsAreRefused:
+    """A `(k, d_model)` operand must be refused HERE, because the engine does not reliably refuse it.
+
+    interp-engine's projector is rank-one. With `orthogonal`/`projection_cap` a span operand raises, but
+    with a tensor-size message that names neither the span nor the projector. With `additive` it does
+    not raise at all when `k` equals the sequence length: it broadcasts positionally and returns a
+    plausible result that is not a span operation.
+    """
+
+    def test_a_span_operand_is_refused_with_the_reason(self):
+        import torch
+
+        from interp_engine_adapter import UnmappableHookError, _require_expressible_operand
+
+        with pytest.raises(UnmappableHookError, match="rank-one"):
+            _require_expressible_operand(torch.randn(2, 8), "blocks.5.mlp.hook_in")
+
+    def test_a_single_direction_passes_through(self):
+        import torch
+
+        from interp_engine_adapter import _require_expressible_operand
+
+        v = torch.randn(8)
+        assert _require_expressible_operand(v, "blocks.5.mlp.hook_in") is v
+
+    def test_the_silent_broadcast_this_guards_is_real(self):
+        """Positive control: without the guard, k == seq_len produces a result with NO error.
+
+        If interp-engine ever started rejecting span operands in `additive`, this test fails and the
+        guard's justification should be revisited rather than left asserting a hazard that is gone.
+        """
+        import torch
+        from interp_engine import SteerSpec
+        from interp_engine.steer import steer_delta
+
+        seq, d = 4, 8
+        h = torch.randn(1, seq, d)
+        V = torch.randn(seq, d)  # k deliberately equal to the sequence length
+        delta = steer_delta(SteerSpec(vector=V, layer=0, coeff=1.0, method="additive"), h, V)
+        out = h + delta  # no exception: this is the hazard
+        assert out.shape == h.shape
