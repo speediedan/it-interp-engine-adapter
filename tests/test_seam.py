@@ -351,3 +351,30 @@ class TestSpanOperandsAreRefused:
         V = torch.randn(3, 8)
         out = h + steer_delta(SteerSpec(vector=V, layer=0, coeff=1.0, method="additive"), h, V)
         assert out.shape[1] == 3 and h.shape[1] == 1, "the sequence-axis replacement no longer occurs"
+
+class TestAsyncCaptureSeam:
+    """The notebook path exists and passes its arguments in the engine's order."""
+
+    def test_capture_async_is_a_coroutine_function(self):
+        import inspect
+
+        from interp_engine_adapter import _Seam
+
+        assert inspect.iscoroutinefunction(_Seam.capture_async)
+
+    def test_argument_order_matches_the_engine(self):
+        """Pin the engine's parameter order, because a future reorder would be silent at our call site.
+
+        The sync and async entry points agree today: `run_with_cache(model, tokens, points)` and
+        `model.capture(prompt_token_ids, points)` line up position for position once `self` is the
+        model, the differing parameter NAME notwithstanding. The hazard is not a present disagreement,
+        it is that both arguments are positional and interchangeable to the interpreter, so if a future
+        engine release reordered them our call would keep working and capture at addresses derived from
+        token ids. Pinned here so that surfaces as a test failure rather than as a wrong tensor.
+        """
+        import inspect
+
+        from interp_engine import EagerModel
+
+        params = list(inspect.signature(EagerModel.capture).parameters)
+        assert params[:3] == ["self", "prompt_token_ids", "points"], params
