@@ -352,6 +352,7 @@ class TestSpanOperandsAreRefused:
         out = h + steer_delta(SteerSpec(vector=V, layer=0, coeff=1.0, method="additive"), h, V)
         assert out.shape[1] == 3 and h.shape[1] == 1, "the sequence-axis replacement no longer occurs"
 
+
 class TestAsyncCaptureSeam:
     """The notebook path exists and passes its arguments in the engine's order."""
 
