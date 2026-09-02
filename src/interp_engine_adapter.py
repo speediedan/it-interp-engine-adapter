@@ -290,6 +290,38 @@ def _steer_method_for(mode: str) -> str:
         )
     return method
 
+def _require_expressible_operand(tensor: Any, hook_name: str) -> Any:
+    """Refuse a span operand, because the engine's projector is rank-one and additive BROADCASTS.
+
+    interpretune's ``intervention_tensor`` is deliberately polymorphic: it may be ``(d_model,)`` or a
+    higher-rank slice, and the J-space modes are defined over a ``(k, d_model)`` span. This backend
+    cannot take that shape, and the two ways it fails are different kinds of bad:
+
+    * ``orthogonal``/``projection_cap`` raise, but with a tensor-size message naming neither the span
+      nor the rank-one projector, so the caller learns nothing about the actual constraint.
+    * ``additive`` does NOT raise. It computes a ``(k, d_model)`` delta, which mismatches the
+      activations and usually fails at the add -- EXCEPT when ``k`` happens to equal the sequence
+      length, where it broadcasts SILENTLY and applies a different vector at each position. Measured:
+      ``k=4, seq=4`` produces a ``(1, 4, 8)`` result with no error and no span semantics anywhere in it.
+
+    A caller wanting a span operation composes per-row specs, which reproduces ``h - V V^+ h`` only for
+    ORTHONORMAL rows (measured exact for orthonormal ``V``, wrong at row cosine -0.240). Orthonormalizing
+    preserves the SPAN, so a rejection survives it, but coordinates expressed in the original basis do
+    not -- so a clamp target stated in pole coordinates is not preserved by that change of basis.
+    """
+    ndim = getattr(tensor, "ndim", None)
+    if ndim is not None and ndim > 1:
+        shape = tuple(getattr(tensor, "shape", ()))
+        raise UnmappableHookError(
+            f"intervention tensor for {hook_name!r} has shape {shape}: this backend takes a single "
+            "direction per spec, because interp-engine's projector is rank-one. A span operand would "
+            "not raise reliably -- with additive steering it broadcasts whenever the leading dimension "
+            "equals the sequence length, applying a different vector per position and returning a "
+            "plausible result that is not a span operation. Compose one spec per direction instead, "
+            "and note that this reproduces a span operation only for ORTHONORMAL rows."
+        )
+    return tensor
+
 def _intervention_targets(interventions: Any, model: Any) -> list[tuple[int, str, Any]]:
     """Yield ``(layer, engine point, spec)`` for each intervention, via the same seam capture uses.
 
@@ -454,7 +486,7 @@ class InterpEngineModelBackend:
         tokens = _tokens_from_batch(batch)
         specs = [
             _Seam.steer_spec(
-                vector=spec.intervention_tensor,
+                vector=_require_expressible_operand(spec.intervention_tensor, point),
                 layer=layer,
                 coeff=spec.scale_factor,
                 method=_steer_method_for(getattr(spec, "mode", "replace")),
