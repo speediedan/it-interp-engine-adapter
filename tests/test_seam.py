@@ -224,3 +224,55 @@ def _mode_table() -> dict:
     from interp_engine_adapter import _MODE_TO_STEER_METHOD
 
     return _MODE_TO_STEER_METHOD
+
+
+class TestTheProjectOrthogonalBoundaryIsGuardedByCode:
+    """`project` must never be mapped to `orthogonal`, and prose alone was not guarding that.
+
+    The existing control (every mapped method exists in `interp_engine.STEER_METHODS`) does NOT protect
+    this boundary: `orthogonal` IS in STEER_METHODS, so a future `project -> orthogonal` entry would
+    pass it. The names resemble each other and the operations discard OPPOSITE halves of the vector
+    space, which makes it the substitution most likely to be made and the most damaging to make.
+    """
+
+    @staticmethod
+    def _fixture():
+        import torch
+
+        torch.manual_seed(0)
+        h = torch.randn(1, 4, 8)
+        v = torch.randn(8)
+        return h, v, v / v.norm()
+
+    def test_orthogonal_can_never_produce_project_onto(self):
+        """No coeff makes `orthogonal` equal `h -> Ph`, because it always retains `(I-P)h`."""
+        import torch
+        from interp_engine.steer import OrthogonalProjector
+
+        h, v, vhat = self._fixture()
+        project_onto = (h * vhat).sum(-1, keepdim=True) * vhat
+        for coeff in (-2.0, -1.0, 0.0, 0.5, 1.0, 2.0, 10.0):
+            got = h + OrthogonalProjector(v).delta(h, coeff)
+            assert not torch.allclose(got, project_onto, atol=1e-6), (
+                f"orthogonal(coeff={coeff}) produced project-onto; the complementary-projection "
+                "argument for refusing `project` no longer holds and the mapping must be revisited"
+            )
+
+    def test_orthogonal_at_zero_is_reject_not_project(self):
+        """The nearest miss, pinned: coeff=0 gives the EXACT COMPLEMENT of what `project` wants.
+
+        This is the jlens `reject` primitive, and having it one argument away from `project` is why
+        the refusal needs a test rather than a comment.
+        """
+        import torch
+        from interp_engine.steer import OrthogonalProjector
+
+        h, v, vhat = self._fixture()
+        parallel = (h * vhat).sum(-1, keepdim=True) * vhat
+        assert torch.allclose(h + OrthogonalProjector(v).delta(h, 0.0), h - parallel, atol=1e-6)
+
+    def test_project_is_still_refused(self):
+        from interp_engine_adapter import UnmappableHookError, _steer_method_for
+
+        with pytest.raises(UnmappableHookError):
+            _steer_method_for("project")

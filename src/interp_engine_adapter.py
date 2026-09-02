@@ -230,19 +230,50 @@ def _names_filter_to_list(names_filter: Any) -> list[str]:
 
 
 #: interpretune ``InterventionSpec.mode`` -> interp-engine ``SteerSpec.method``, for the modes whose
-#: semantics were VERIFIED to match. Only ``add`` is here, and the omissions are the point:
+#: semantics were MEASURED to match. Only ``add`` is here; each omission has its own reason, and the
+#: reasons are not interchangeable.
 #:
-#: * ``replace`` overwrites the activation at the target position. Additive steering never sees the
-#:   current activation, so it cannot express an overwrite. It is also interpretune's DEFAULT mode,
-#:   which is why silently treating it as additive was the worst possible failure -- the most common
-#:   call would have returned a plausible answer to a different question.
-#: * ``patch`` is a lens-coordinate SWAP (``h <- h + V(sigma(c) - c)``), computed FROM the current
-#:   activation. Same obstacle, and it is the mode the J-space steering path uses.
-#: * ``project`` replaces the activation with a projection result. interp-engine's ``orthogonal`` and
-#:   ``projection_cap`` are plausible neighbours, but "plausible neighbour" is exactly the reasoning
-#:   this adapter refuses for hook names, and applying it to an intervention would write somewhere the
-#:   caller did not ask for. Left unmapped until someone verifies the semantics against the engine.
+#: ``add`` maps because the operations are the same one: interpretune's ``add`` is
+#: ``h + tensor * scale`` and the engine's ``additive`` delta is ``coeff * vector``.
+#:
+#: ``project`` is NOT mapped to ``orthogonal``, DESPITE THE NAME, and this is the substitution most
+#: likely to be made by someone reading quickly. They are COMPLEMENTARY projections:
+#:
+#:     engine ``orthogonal``   h -> (I-P)h + coeff * P h    keeps the orthogonal part, scales parallel
+#:     interpretune ``project``   h -> P h                  keeps the parallel part, discards orthogonal
+#:
+#: ``orthogonal`` always retains ``(I-P)h``, so NO coeff produces ``Ph`` (measured: coeff 0, 1, 2, -1
+#: all fail; ``test_orthogonal_can_never_produce_project_onto`` pins it). ``projection_cap`` is not it
+#: either: it clamps a projection into ``[min, max]`` rather than replacing an activation.
+#:
+#: ``replace`` overwrites the whole activation. Both activation-reading engine methods move only the
+#: component along one direction and leave the complement untouched by construction, so neither can
+#: express an overwrite.
+#:
+#: ``patch`` is a lens-coordinate SWAP, ``h <- h + V(sigma(c) - c)``, whose targets are a permutation of
+#: the coordinates MEASURED during the forward. ``projection_cap`` takes static ``min``/``max``, so a
+#: data-dependent target cannot be expressed. This is the mode the J-space steering path uses.
+#:
+#: NOTE on a reason that was wrong here before: "additive steering never observes the current
+#: activation" is true of ``additive`` and false of ``orthogonal`` and ``projection_cap``, which both
+#: read it. Stating it as the general justification would have licensed exactly the ``project ->
+#: orthogonal`` mapping refused above. Each refusal now names its own mechanism.
+#:
+#: MEASURED CANDIDATES for modes interpretune does not define yet (jlens lane, k=1 only -- see
+#: ``_REJECT_SPAN_CAVEAT``): ``reject`` (h - VV^+h) == ``orthogonal`` with ``coeff=0``, exactly;
+#: ``clamp`` (set the coordinate along v to a target) == ``projection_cap`` with ``min == max ==
+#: target``, exactly. Both verified numerically before being written down.
 _MODE_TO_STEER_METHOD = {"add": "additive"}
+
+#: Why the measured ``reject``/``clamp`` mappings are qualified by ``k=1``. The engine's projector is
+#: RANK ONE (``P = v_hat v_hat^T``, one vector per ``SteerSpec``), while the jlens modes are defined
+#: over a ``(k, d_model)`` span. Composing k per-row specs reproduces the span operation ONLY when the
+#: rows are orthonormal: measured, stacked rank-1 rejections equal ``h - VV^+h`` exactly for an
+#: orthonormal ``V`` and NOT for a generic one (row cosine -0.240 was enough to break it). J-lens pole
+#: pairs are not orthonormal by construction, so a caller wanting a span operation must orthonormalize
+#: first and understand that this changes which subspace is being removed.
+_REJECT_SPAN_CAVEAT = "rank-1 per spec; span operations need orthonormal rows"
+
 
 
 def _steer_method_for(mode: str) -> str:
@@ -251,11 +282,11 @@ def _steer_method_for(mode: str) -> str:
     if method is None:
         raise UnmappableHookError(
             f"intervention mode {mode!r} cannot be expressed through interp-engine's steering surface "
-            f"from this backend (supported: {sorted(_MODE_TO_STEER_METHOD)}). Additive steering never "
-            "observes the current activation, so overwrite-style modes (replace, patch, project) "
-            "cannot be reconstructed from it. Refused rather than approximated: a steering call that "
-            "silently applied the wrong mode would complete and return plausible logits for an "
-            "intervention nobody asked for."
+            f"from this backend (supported: {sorted(_MODE_TO_STEER_METHOD)}). See the mapping table's "
+            "notes for why each refused mode is refused -- the reasons differ, and 'project' in "
+            "particular is NOT interp-engine's 'orthogonal' despite the name: they are complementary "
+            "projections. Refused rather than approximated: a steering call that silently applied the "
+            "wrong mode would complete and return plausible logits for an intervention nobody asked for."
         )
     return method
 
