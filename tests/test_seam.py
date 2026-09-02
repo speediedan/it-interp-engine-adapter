@@ -303,19 +303,30 @@ class TestSpanOperandsAreRefused:
         v = torch.randn(8)
         assert _require_expressible_operand(v, "blocks.5.mlp.hook_in") is v
 
-    def test_the_silent_broadcast_this_guards_is_real(self):
-        """Positive control: without the guard, k == seq_len produces a result with NO error.
+    def test_the_silent_window_is_data_dependent_not_narrow(self):
+        """Positive control, and the reason a guard beats a test here.
 
-        If interp-engine ever started rejecting span operands in `additive`, this test fails and the
-        guard's justification should be revisited rather than left asserting a hazard that is gone.
+        Whether a span operand is accepted silently depends on the PROMPT LENGTH at the call, not on
+        the code: silent at `k == seq_len`, loud otherwise. A test that fixes one prompt length can
+        only establish that THAT length is not the bad one. This asserts the shape of the window
+        rather than one point in it, so if interp-engine ever validates span operands properly the
+        guard's justification is revisited rather than left asserting a hazard that is gone.
         """
         import torch
         from interp_engine import SteerSpec
         from interp_engine.steer import steer_delta
 
-        seq, d = 4, 8
-        h = torch.randn(1, seq, d)
-        V = torch.randn(seq, d)  # k deliberately equal to the sequence length
-        delta = steer_delta(SteerSpec(vector=V, layer=0, coeff=1.0, method="additive"), h, V)
-        out = h + delta  # no exception: this is the hazard
-        assert out.shape == h.shape
+        d = 8
+        silent, loud = [], []
+        for k in (3, 4, 5):
+            for seq in (3, 4, 5):
+                h = torch.randn(1, seq, d)
+                V = torch.randn(k, d)
+                try:
+                    out = h + steer_delta(SteerSpec(vector=V, layer=0, coeff=1.0, method="additive"), h, V)
+                    (silent if out.shape == h.shape else loud).append((k, seq))
+                except Exception:
+                    loud.append((k, seq))
+        # silent exactly on the diagonal: the hazard is k == seq_len, i.e. a property of the prompt
+        assert silent == [(k, k) for k in (3, 4, 5)], f"silent window moved: {silent}"
+        assert loud, "nothing raised at all; the 'intermittent' framing no longer holds"
