@@ -164,6 +164,12 @@ pre-commit run --all-files
 - **Shipped docs must not reference agent workstreams.** `README.md`, this file and docstrings outlive
   the work that produced them and are read by users. Park an open decision on an **open issue** and
   cite the number; a workstream reference is invisible to a reader and lost when the session closes.
+  - **Check the reader can reach it.** This repo is PRIVATE and `interpretune` is PUBLIC, so an issue
+    number here, cited from there, is exactly as unreachable as the workstream reference the rule
+    exists to replace. When citing across that boundary, name the repo, say it is private, and carry a
+    two-sentence summary of what the issue decides, so a reader without access learns the shape rather
+    than meeting a pointer that reads as documented-elsewhere and is not. Revisit those summaries if
+    this repo goes public.
 - **No ephemeral CI references** (build numbers, run URLs, approval ids) in commit messages, code
   comments or anything else a future reader will meet without that context. Describe the environment
   shape and the symptom instead. Those ids belong in PR threads and workstream logs.
