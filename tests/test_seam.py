@@ -149,8 +149,8 @@ class TestInterventionTargetsAreModelAware:
     def test_the_model_blind_reading_really_does_differ(self):
         """Positive control for the refusal above, and the reason it exists.
 
-        If the engine ever started raising on a null model, or the alias table grew to cover these
-        names, the refusal would be guarding nothing -- and this test would say so by failing.
+        If the engine ever started raising on a null model, or the alias table grew to cover these names, the refusal
+        would be guarding nothing -- and this test would say so by failing.
         """
         from interp_engine import tlens_hook_to_point
 
@@ -339,9 +339,9 @@ class TestSpanOperandsAreRefused:
     def test_the_worst_case_replaces_the_sequence_axis(self):
         """seq_len == 1 does not merely corrupt values, it changes the prompt's length.
 
-        A 1-token prompt steered with a k-row span yields a k-POSITION activation, which flows
-        downstream as though the prompt had k tokens. seq_len == 1 is every step of incremental
-        decoding, so the case most likely to be hit in generation is the one that fails worst.
+        A 1-token prompt steered with a k-row span yields a k-POSITION activation, which flows downstream as though the
+        prompt had k tokens. seq_len == 1 is every step of incremental decoding, so the case most likely to be hit in
+        generation is the one that fails worst.
         """
         import torch
         from interp_engine import SteerSpec
