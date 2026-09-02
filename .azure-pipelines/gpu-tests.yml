@@ -152,6 +152,13 @@ jobs:
       # this job runs the same tests as the CPU gate on GPU hardware. That is expected until the first
       # device-dependent test lands. The comparison below is here so that when one does, a narrowed run
       # cannot be reported as a full one.
+      #
+      # IF YOU ARE COPYING THIS FILE INTO ANOTHER ADAPTER REPO, the comparison is not optional there and
+      # may already be load-bearing on day one. A repo that carries a conftest honouring
+      # IT_RUN_CUDA_TESTS but has no CUDA-marked tests yet SELECTS ZERO and reports a green summary: the
+      # selector replaces the collected list, so "0 passed" is indistinguishable from success unless the
+      # collection count is printed beside it. That is worse than this repo's eventual case, because it
+      # is green from the first run rather than arriving later, and nothing else in the job would say so.
       - bash: |
           set -e
           collected=$(python -m pytest --collect-only -q 2>/dev/null | tail -1)
