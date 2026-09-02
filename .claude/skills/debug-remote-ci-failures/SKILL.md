@@ -30,8 +30,8 @@ mechanics and a failure taxonomy specific to being a hub-delivered component.
 | `gpu` | `workflow_dispatch` only | `[self-hosted, gpu]` | **inert**: no such runner exists on the maintainer's host, so it never runs and never blocks |
 
 `cpu` installs the pinned engine line plus `interpretune` **from source** (pre-MVP, not on PyPI), and
-hand-carries `transformer-lens` and `sae-lens` because interpretune's core config imports both eagerly
-even though this adapter uses neither.
+nothing else. There is no longer any hand-carry: see category B below for what an install failure
+therefore means.
 
 ## Step 1: Pull the logs
 
@@ -104,11 +104,22 @@ gh run list --limit 3                                     # is CI red on this to
 genuinely red on the same import, then it is drift. Do not fix it by weakening the test; raise it
 with the `ie-integration` session or file it against interpretune.
 
-### B. The temporary branch pin
+### B. An undeclared dependency upstream
 
-Both jobs pin `interpretune @ git+...@fix/declare-jsonschema-dep` rather than `@main`, because a bare
-install of main cannot be imported until speediedan/interpretune#404 merges. Three call sites, flipped
-together. If CI fails on an install step, check whether that branch still exists and still resolves.
+All three call sites now track `interpretune @ git+...@main` and install **nothing else by hand**. The
+`transformer-lens` / `sae-lens` pins are gone (interpretune#401's follow-up, `c3423a5`), so this repo
+no longer cushions interpretune's declaration gaps.
+
+That is deliberate and it changes what an install failure means. Previously a missing declaration
+upstream was masked here: `transformer-lens` silently supplied the undeclared `jaxtyping`, which is why
+the two had to be dropped together and why no environment inside this repo could reveal the problem.
+Now the same class fails loudly at import, in this job, on the commit that introduced it.
+
+So an `ImportError` or `ModuleNotFoundError` at install or collection naming a package this repo never
+asked for is **evidence about interpretune's declarations**, not about this repo. Confirm by installing
+interpretune alone in a clean venv and importing the surface the entrypoint uses; if it fails there
+too, the fix belongs upstream (the shape is interpretune#403 and #401) rather than in a pin here.
+Re-adding a pin to make CI green would restore the masking that hid it.
 
 ### C. interp-engine minor-version signature change
 
