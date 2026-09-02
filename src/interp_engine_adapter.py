@@ -188,6 +188,27 @@ class _Seam:
         """A plain forward pass, no capture and no steering."""
         return engine_model.forward(tokens)
 
+    async def capture_async(engine_model: Any, tokens: Any, points: list[Any], detach: bool = True) -> Any:
+        """The notebook path: one forward pass capturing the requested points, awaited.
+
+        ``run_with_cache`` REFUSES inside a running event loop by design, and Jupyter always has one,
+        so a notebook cannot use the sync surface this adapter's ops path uses. ``EagerModel.capture``
+        is the async equivalent. Kept here rather than reached around the seam so the invariant holds
+        for the notebook too: exactly one place in this adapter touches the engine, and if the async
+        entry point moves, one method moves with it.
+
+        Deliberately NOT nest_asyncio: patching the running loop to make a sync API work in a notebook
+        hides the reason the sync API refused, and the engine offers a real async surface.
+        """
+        # Same argument ORDER as the sync free function, despite the different parameter name:
+        # `run_with_cache(model, tokens, points)` and `model.capture(prompt_token_ids, points)` line up
+        # position for position once `self` is the model. Worth stating because both arguments are
+        # positional and interchangeable to the interpreter, so a future reorder in the engine would be
+        # SILENT here -- the call would keep working and capture at addresses derived from token ids.
+        # `test_argument_order_matches_the_engine` pins the engine's order so that surfaces as a test
+        # failure rather than as a wrong tensor.
+        return await engine_model.capture(tokens, points, detach=detach)
+
     @staticmethod
     def capabilities() -> Any:
         """The engine's capability set, readable before warmup.
