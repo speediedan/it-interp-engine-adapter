@@ -167,3 +167,60 @@ def _seam_alias_table() -> dict:
     from interp_engine_adapter import _Seam
 
     return _Seam._SUBLAYER_INPUT_ALIASES
+
+
+class TestInterventionModeIsHonoured:
+    """`InterventionSpec.mode` must reach the engine, or be refused -- never silently dropped.
+
+    The first draft of this backend built every SteerSpec with the default method, so `mode` was
+    ignored entirely. Interpretune's DEFAULT mode is `replace`, and the J-space steering path uses
+    `patch`; both would have been applied as ADDITIVE steering, completing normally and returning
+    plausible logits for an intervention nobody requested.
+    """
+
+    def test_add_maps_to_additive(self):
+        from interp_engine_adapter import _steer_method_for
+
+        assert _steer_method_for("add") == "additive"
+
+    @pytest.mark.parametrize("mode", ["replace", "patch", "project"])
+    def test_modes_that_need_the_current_activation_are_refused(self, mode):
+        from interp_engine_adapter import UnmappableHookError, _steer_method_for
+
+        with pytest.raises(UnmappableHookError, match=f"intervention mode {mode!r} cannot be expressed"):
+            _steer_method_for(mode)
+
+    def test_every_mapped_method_is_one_the_engine_actually_offers(self):
+        """Positive control: the mapping table must name real engine methods, not aspirational ones."""
+        from interp_engine import STEER_METHODS
+
+        from interp_engine_adapter import _MODE_TO_STEER_METHOD
+
+        for mode, method in _MODE_TO_STEER_METHOD.items():
+            assert method in STEER_METHODS, f"{mode!r} maps to {method!r}, absent from {STEER_METHODS}"
+
+    def test_the_refused_modes_are_exactly_the_ones_interpretune_defines(self):
+        """If interpretune adds a mode, this test fails until someone decides how it maps.
+
+        The failure mode being guarded is a NEW mode defaulting into silence: without this, a mode
+        added upstream would simply not appear in the table and would raise only when someone used it.
+        """
+        from interpretune.analysis.backends.interventions import InterventionSpec
+
+        documented = {"replace", "add", "patch", "project"}
+        # `_field_defaults`, not `InterventionSpec.mode`: this is a NamedTuple, so the attribute is the
+        # field DESCRIPTOR and comparing it to a string is always False -- an assertion that would have
+        # failed for a reason unrelated to what it checks.
+        assert InterventionSpec._field_defaults["mode"] == "replace", (
+            "the default intervention mode changed; revisit which modes this backend refuses"
+        )
+        unmapped = documented - set(_mode_table())
+        assert unmapped == {"replace", "patch", "project"}, (
+            f"interpretune's intervention modes changed: {unmapped}. Decide the mapping or the refusal."
+        )
+
+
+def _mode_table() -> dict:
+    from interp_engine_adapter import _MODE_TO_STEER_METHOD
+
+    return _MODE_TO_STEER_METHOD

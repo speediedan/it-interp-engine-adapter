@@ -229,6 +229,36 @@ def _names_filter_to_list(names_filter: Any) -> list[str]:
     return list(names_filter)
 
 
+#: interpretune ``InterventionSpec.mode`` -> interp-engine ``SteerSpec.method``, for the modes whose
+#: semantics were VERIFIED to match. Only ``add`` is here, and the omissions are the point:
+#:
+#: * ``replace`` overwrites the activation at the target position. Additive steering never sees the
+#:   current activation, so it cannot express an overwrite. It is also interpretune's DEFAULT mode,
+#:   which is why silently treating it as additive was the worst possible failure -- the most common
+#:   call would have returned a plausible answer to a different question.
+#: * ``patch`` is a lens-coordinate SWAP (``h <- h + V(sigma(c) - c)``), computed FROM the current
+#:   activation. Same obstacle, and it is the mode the J-space steering path uses.
+#: * ``project`` replaces the activation with a projection result. interp-engine's ``orthogonal`` and
+#:   ``projection_cap`` are plausible neighbours, but "plausible neighbour" is exactly the reasoning
+#:   this adapter refuses for hook names, and applying it to an intervention would write somewhere the
+#:   caller did not ask for. Left unmapped until someone verifies the semantics against the engine.
+_MODE_TO_STEER_METHOD = {"add": "additive"}
+
+
+def _steer_method_for(mode: str) -> str:
+    """Translate an intervention mode, refusing the ones this backend cannot express faithfully."""
+    method = _MODE_TO_STEER_METHOD.get(mode)
+    if method is None:
+        raise UnmappableHookError(
+            f"intervention mode {mode!r} cannot be expressed through interp-engine's steering surface "
+            f"from this backend (supported: {sorted(_MODE_TO_STEER_METHOD)}). Additive steering never "
+            "observes the current activation, so overwrite-style modes (replace, patch, project) "
+            "cannot be reconstructed from it. Refused rather than approximated: a steering call that "
+            "silently applied the wrong mode would complete and return plausible logits for an "
+            "intervention nobody asked for."
+        )
+    return method
+
 def _intervention_targets(interventions: Any, model: Any) -> list[tuple[int, str, Any]]:
     """Yield ``(layer, engine point, spec)`` for each intervention, via the same seam capture uses.
 
@@ -392,7 +422,13 @@ class InterpEngineModelBackend:
             )
         tokens = _tokens_from_batch(batch)
         specs = [
-            _Seam.steer_spec(vector=spec.intervention_tensor, layer=layer, coeff=spec.scale_factor, point=point)
+            _Seam.steer_spec(
+                vector=spec.intervention_tensor,
+                layer=layer,
+                coeff=spec.scale_factor,
+                method=_steer_method_for(getattr(spec, "mode", "replace")),
+                point=point,
+            )
             for layer, point, spec in _intervention_targets(interventions, model)
         ]
         pre = _Seam.forward(model, tokens)
