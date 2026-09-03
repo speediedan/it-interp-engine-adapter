@@ -6,13 +6,13 @@ name: tests
 # repo red rather than a framework nobody expects to break.
 #
 # Two jobs, as a model for hub-component CI:
-#   cpu — hosted runner, every push/PR. Interpretune is installed from its GitHub source repo
+#   cpu: hosted runner, every push/PR. Interpretune is installed from its GitHub source repo
 #         (it is pre-MVP and not on PyPI); uv is used so a future consumer inheriting
 #         interpretune's [tool.uv] override workflow stays a one-line change.
-#   gpu — manual dispatch on a self-hosted runner carrying the `gpu` label. Hub contributors with
+#   gpu: manual dispatch on a self-hosted runner carrying the `gpu` label. Hub contributors with
 #         GPU hardware register a runner and dispatch this to exercise device-dependent paths;
 #         without such a runner the job simply never runs and never blocks a merge.
-#   cold-venv — the BOOTSTRAP gate: a consumer who has nothing installed. See the job for why it
+#   cold-venv: the BOOTSTRAP gate: a consumer who has nothing installed. See the job for why it
 #         installs less than `cpu` does, which is the entire point of it existing.
 on:
   push:
