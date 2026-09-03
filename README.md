@@ -51,7 +51,7 @@ how this class of defect propagates, and this adapter declines to add to it.
 
 ## Requirements
 
-`interp-engine~=1.3.0`, and an Interpretune build with hub-delivered adapter support (#125).
+`interp-engine~=1.3.0`, and an Interpretune build with hub-delivered adapter support (speediedan/interpretune#125).
 
 The pin is deliberate: interp-engine's 1.x minors change signatures without deprecation aliases, as a
 considered choice on their part. Every engine symbol is reached through one seam in the entrypoint,

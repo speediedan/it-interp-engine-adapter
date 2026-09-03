@@ -122,7 +122,7 @@ jobs:
           # CPU variant would silently make every GPU assertion below vacuous.
           uv --version
           #
-          # NO transformer-lens / sae-lens hand-carry. They were carried until interpretune#401's
+          # NO transformer-lens / sae-lens hand-carry. They were carried until speediedan/interpretune#401's
           # follow-up (merged as c3423a5) declared jaxtyping and moved the analysis stack's module-level
           # sae_lens import behind TYPE_CHECKING. transformer-lens had been silently supplying jaxtyping,
           # which is why the pair had to be dropped together and why no in-repo env could reveal it.

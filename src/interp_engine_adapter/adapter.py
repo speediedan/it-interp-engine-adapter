@@ -1,8 +1,8 @@
 """Hub-delivered Interpretune adapter for interp-engine (decoderesearch/interp-engine).
 
 Loaded by ``interpretune.hub.adapters.load_hub_adapter``: a single self-contained module, executed in
-the caller's process behind the #255 trust gate, which registers ``Adapter.interp_engine`` and its
-compositions into ``CompositionRegistry``.
+the caller's process behind the speediedan/interpretune#255 trust gate, which registers
+``Adapter.interp_engine`` and its compositions into ``CompositionRegistry``.
 
 **Self-contained by requirement, not by preference.** The rails import this file by path rather than
 as a package, so it cannot import sibling modules from its own repo. Importing from the *installed*
@@ -568,7 +568,7 @@ class InterpEngineModelBackend:
 
     Interpretune's ``ModelBackend`` was decomposed into a required core and capability-gated method
     groups precisely so a component like this one can implement what it actually does and SAY so
-    (interpretune R1, #401). This implements:
+    (interpretune R1, speediedan/interpretune#401). This implements:
 
       * ``ModelBackendCore`` -- ``fwd``, ``fwd_w_cache``, ``wrap_activation_cache``, and the capability
         introspection ops gate on.

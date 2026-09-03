@@ -12,6 +12,8 @@ name: tests
 #   gpu — manual dispatch on a self-hosted runner carrying the `gpu` label. Hub contributors with
 #         GPU hardware register a runner and dispatch this to exercise device-dependent paths;
 #         without such a runner the job simply never runs and never blocks a merge.
+#   cold-venv — the BOOTSTRAP gate: a consumer who has nothing installed. See the job for why it
+#         installs less than `cpu` does, which is the entire point of it existing.
 on:
   push:
   pull_request:
@@ -31,7 +33,7 @@ jobs:
           # The pinned engine line, plus interpretune (from source; not yet on PyPI) for the
           # registration surface the entrypoint uses. CPU torch keeps the hosted runner light.
           #
-          # NO transformer-lens / sae-lens hand-carry. They were carried until interpretune#401's
+          # NO transformer-lens / sae-lens hand-carry. They were carried until speediedan/interpretune#401's
           # follow-up (merged as c3423a5) declared jaxtyping and moved the analysis stack's module-level
           # sae_lens import behind TYPE_CHECKING. transformer-lens had been silently supplying jaxtyping,
           # which is why the pair had to be dropped together and why no in-repo env could reveal it.
@@ -41,6 +43,89 @@ jobs:
             "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
       - name: Test
         run: pytest -v
+
+  cold-venv:
+    # THE BOOTSTRAP GATE: can this component come up for someone who has NOTHING?
+    #
+    # `cpu` installs `.[test]` and runs pytest, which answers "do the tests pass". That is a different
+    # question, and it can pass while this one fails: a test extra, or anything pytest drags in, can
+    # supply an import the component needs and never declared. This repo has already been on the wrong
+    # side of exactly that -- transformer-lens silently supplied interpretune's undeclared `jaxtyping`,
+    # and no environment inside this repo could reveal it, because every environment had the mask
+    # installed. A cold venv is the environment that has no mask.
+    #
+    # So this job deliberately installs LESS: the component and its declared dependencies, and nothing
+    # else. No `[test]`, no pytest, no circuit-tracer. If it needs something it did not declare, this is
+    # where that becomes visible, on the commit that introduced it.
+    #
+    # It is also the purest form of the requirement that the two core compositions work when the
+    # OPTIONAL circuit-tracer is absent: here it is absent because nothing put it there, rather than
+    # because a test skipped.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Create a cold venv and install ONLY what is declared
+        run: |
+          python -m pip install --upgrade --quiet uv
+          uv venv /tmp/cold
+          # `--torch-backend=cpu` for runner weight only; it changes which torch wheel resolves, not
+          # which of THIS component's dependencies do.
+          VIRTUAL_ENV=/tmp/cold uv pip install --torch-backend=cpu . \
+            "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
+          echo "=== what landed (a short list is the point) ==="
+          VIRTUAL_ENV=/tmp/cold uv pip list
+      - name: Bootstrap
+        run: |
+          /tmp/cold/bin/python - <<'PY'
+          import importlib.util, sys
+
+          # 1. The optional dependency really is absent. If this ever becomes true, the rest of this job
+          #    stops testing what it claims to and would pass for the wrong reason.
+          assert importlib.util.find_spec("circuit_tracer") is None, (
+              "circuit-tracer is present in the COLD venv, so this job is no longer testing a cold "
+              "environment. Something started declaring it."
+          )
+
+          # 2. The component imports with only its declared dependencies present.
+          import interp_engine_adapter
+          from interp_engine_adapter.adapter import ADAPTER_NAME, InterpEngineAdapter, UnmappableHookError, _Seam
+
+          # 3. The manifest resolves BESIDE the installed module -- the packaging property that lets the
+          #    pip path and the hub path answer a manifest lookup the same way.
+          from pathlib import Path
+          import interp_engine_adapter.adapter as mod
+          manifest = Path(mod.__file__).parent / "it_component.yaml"
+          assert manifest.is_file(), f"manifest not installed beside the module: {manifest}"
+
+          # 4. The compositions that must work without circuit-tracer DO, and the one that needs it is
+          #    not registered. This is the maintainer's requirement in its coldest form.
+          from interpretune.adapters.registration import CompositionRegistry, register_dynamic_adapter
+          register_dynamic_adapter(ADAPTER_NAME, source="speediedan/it-interp-engine-adapter")
+          registry = CompositionRegistry()
+          InterpEngineAdapter.register_adapter_ctx(registry)
+          got = sorted(
+              "+".join(sorted(getattr(a, "value", str(a)) for a in key[1:]))
+              for key in registry.available_compositions()
+          )
+          print("registered:", got)
+          assert got == ["core+interp_engine", "interp_engine+lightning"], (
+              f"cold venv should register exactly the two circuit-tracer-free compositions, got {got}"
+          )
+
+          # 5. The refusal this component exists for survives a minimal install. A bootstrap that comes
+          #    up without its central guarantee is not a successful bootstrap.
+          try:
+              _Seam.point_for("blocks.5.hook_mlp_in", model=None)
+          except UnmappableHookError:
+              pass
+          else:
+              sys.exit("the sublayer-input refusal did not fire in the cold venv")
+
+          print("cold bootstrap OK")
+          PY
 
   gpu:
     # Runs only when dispatched, and only on a self-hosted runner labelled `gpu`.
