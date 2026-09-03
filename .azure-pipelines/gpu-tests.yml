@@ -130,8 +130,52 @@ jobs:
           # than being masked by a pin here, which is the outcome worth having.
           uv pip install -e ".[test]" \
             "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
+          #
+          # CIRCUIT-TRACER, DERIVED FROM INTERPRETUNE'S OWN PIN RATHER THAN RESTATED HERE.
+          #
+          # The `(core, interp_engine, circuit_tracer)` composition's tests -- the pairing class, its MRO,
+          # and the guard that keeps this adapter's hook refusal alive inside the composition -- skip when
+          # circuit-tracer is absent. Both CI lanes lacked it, so the NEWEST and least-covered code in this
+          # repo was running nowhere. Measured on the merge build for that composition: 55 collected,
+          # 47 passed, 8 skipped.
+          #
+          # It cannot come along with interpretune: interpretune carries it in a PEP 735 `dependency-group`
+          # (`git-deps`), and groups do not transit a git install the way an extra would.
+          #
+          # It also cannot become an extra while it is a GIT pin: interpretune publishes to real PyPI, and
+          # PyPI rejects direct-reference (git URL) dependencies in published metadata. So `git-deps` is
+          # where a git URL is the only thing it CAN be, not a stylistic choice to be revisited.
+          #
+          # So it is READ from interpretune's `pyproject.toml` at the ref this job installs, never copied.
+          # Copying the SHA would re-create exactly the hand-carry this repo removed with transformer-lens
+          # and sae-lens: a second pin that looks authoritative, drifts silently, and is only discovered
+          # when the two disagree. Derived, it is right by construction and follows interpretune's bumps.
+          #
+          # THIS BLOCK HAS A DEFINED END, and it is written down so it does not quietly become permanent.
+          # When circuit-tracer's two upstream PRs land and interpretune retires the fork pin for a VERSION
+          # pin, that pin can live in an ordinary extra, an extra transits a git install normally, and this
+          # whole derivation should be DELETED in favour of installing that extra. A workaround that
+          # outlives its reason is indistinguishable from architecture to whoever reads it next.
+          CT_REQ=$(python - <<'PY'
+          import tomllib, urllib.request, sys
+          url = "https://raw.githubusercontent.com/speediedan/interpretune/main/pyproject.toml"
+          data = tomllib.loads(urllib.request.urlopen(url, timeout=30).read().decode())
+          entries = [e for g in data.get("dependency-groups", {}).values()
+                     for e in g if isinstance(e, str) and e.startswith("circuit-tracer")]
+          if len(entries) != 1:
+              sys.exit(f"expected exactly one circuit-tracer entry in interpretune's dependency-groups, "
+                       f"found {len(entries)}: {entries}")
+          print(entries[0])
+          PY
+          )
+          echo "circuit-tracer, as interpretune pins it: ${CT_REQ}"
+          uv pip install "${CT_REQ}"
           echo "=== resolved, and from WHERE (a version string would not show a second torch) ==="
           python -c "import torch, interpretune, interp_engine_adapter as a; print(torch.__file__); print(interpretune.__file__); print(a.__file__)"
+          # ASSERT THE COVERAGE EXISTS rather than inferring it from the install having been attempted. If
+          # circuit-tracer stops resolving, the composition tests go back to skipping and the build stays
+          # GREEN while covering less -- the precise failure this step was added to end.
+          python -c "import circuit_tracer; print('circuit_tracer', circuit_tracer.__file__)"
         displayName: "Install"
 
       - bash: |
@@ -158,10 +202,28 @@ jobs:
       # collection count is printed beside it. That is worse than this repo's eventual case, because it
       # is green from the first run rather than arriving later, and nothing else in the job would say so.
       - bash: |
-          set -e
+          # `pipefail` MATTERS HERE and nowhere else in this file: pytest is piped to `tee` below, and
+          # `set -e` alone reports the exit status of the LAST command in a pipeline. Without it a failing
+          # suite would hand the step `tee`'s success and the build would go green on red tests -- a worse
+          # version of the exact silent-pass class the rest of this step exists to catch. Verified, not
+          # assumed: `set -e; (exit 1) | tee /dev/null` continues; adding `pipefail` stops.
+          set -eo pipefail
           collected=$(python -m pytest --collect-only -q 2>/dev/null | tail -1)
           echo "full collection: ${collected}"
-          IT_RUN_CUDA_TESTS=1 python -m pytest -v --durations=25
+          # `-rs` so skip REASONS are in the same output the run already produces, and `tee` so the
+          # assertion below reads that run rather than a second one: running the suite twice to check a
+          # property of the first is both slower and a lie if the two runs ever disagree.
+          IT_RUN_CUDA_TESTS=1 python -m pytest -v -rs --durations=25 2>&1 | tee /tmp/gpu_run.txt
+          # ASSERT NOTHING SKIPPED FOR A MISSING OPTIONAL DEPENDENCY. This is the lane that installs
+          # circuit-tracer, so a skip here means the install above silently stopped working. Reporting
+          # `collected` beside `passed` catches a NARROWED selection; this catches the other shape, where
+          # the selection is full and part of it quietly opts out.
+          if grep -qiE "skipped.*circuit-tracer not installed" /tmp/gpu_run.txt; then
+            echo "ERROR: composition tests skipped because circuit-tracer is missing in the ONE lane"
+            echo "that is supposed to provide it. The install step above did not take."
+            grep -iE "SKIPPED" /tmp/gpu_run.txt || true
+            exit 1
+          fi
         displayName: "Test (GPU)"
 
       # WORKSPACE OWNERSHIP, and it must run INSIDE the container, where this uid can still write.
