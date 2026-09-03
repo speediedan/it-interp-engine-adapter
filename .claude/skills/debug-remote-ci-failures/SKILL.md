@@ -126,8 +126,9 @@ Re-adding a pin to make CI green would restore the masking that hid it.
 Symptom: `TypeError` or `AttributeError` from an `interp_engine` symbol.
 
 `interp-engine`'s 1.x minors change signatures with **no deprecation aliases**, by design. The pin is
-`~=1.3.0` (`>=1.3.0, ==1.3.*`) precisely to prevent this; note the trailing `.0`, because a bare `~=1.3` would
-admit 1.4, which is the break the pin exists to stop.
+`~=1.5.1` (`>=1.5.1, ==1.5.*`) precisely to prevent this; note the trailing patch digit, because a bare
+`~=1.5` would admit 1.6, which is the break the pin exists to stop. The seam's contract tests assert against
+the INSTALLED engine, so they are what validates a bump rather than what obstructs it.
 
 Every engine symbol is reached through `_Seam`, so a rename is a one-file change. Fix it there, and
 only there: an engine call that bypasses the seam is the actual defect.
