@@ -90,6 +90,77 @@ class TestRegistration:
             assert registry.get(key) == (InterpEngineModule,)
 
 
+class TestModelBackendIsAttachedNotOverridden:
+    """The composition contract: attach a model backend only when nothing else has.
+
+    This is the half of composition that fails SILENTLY. If two adapters in one MRO each assign
+    `_model_backend` unconditionally, the composition still constructs, still runs, and simply loses one
+    adapter's capabilities -- decided by MRO order, reported nowhere. Interpretune's circuit-tracer
+    adapter states the contract and honours it; these tests are what keep this side of a composition
+    honouring it too, because nothing upstream tests this adapter's behaviour.
+    """
+
+    def _module_with(self, existing):
+        """A stand-in carrying just the surface `post_auto_model_init` touches.
+
+        Deliberately not an `InterpEngineModule`: constructing one pulls a real interpretune session, and
+        what is under test is the attach DECISION, which reads `__dict__` and calls the seam. A narrow
+        double keeps the failure attributable to that decision rather than to session setup.
+        """
+        from interp_engine_adapter.adapter import InterpEngineCaptureMixin
+
+        class _Rest:
+            """Stands in for the rest of the MRO, which the mixin's `super()` call reaches."""
+
+            def post_auto_model_init(self, *args, **kwargs):
+                return "inner"
+
+        class _Composed(InterpEngineCaptureMixin, _Rest):
+            def __init__(self):
+                self.it_cfg = None
+                self.model = object()
+                self.tokenizer = None
+                if existing is not None:
+                    self._model_backend = existing
+
+        return _Composed()
+
+    def test_attaches_when_nothing_has(self, monkeypatch):
+        import interp_engine_adapter.adapter as mod
+
+        monkeypatch.setattr(mod._Seam, "wrap_model", staticmethod(lambda *a, **k: "engine"))
+        m = self._module_with(None)
+        m.post_auto_model_init()
+        assert isinstance(m._model_backend, mod.InterpEngineModelBackend)
+
+    def test_does_not_override_a_backend_another_adapter_attached(self, monkeypatch):
+        """The regression that matters.
+
+        An unconditional assignment passes every single-adapter test and only misbehaves in a composition, which is
+        where nobody is looking.
+        """
+        import interp_engine_adapter.adapter as mod
+
+        monkeypatch.setattr(mod._Seam, "wrap_model", staticmethod(lambda *a, **k: "engine"))
+        sentinel = object()
+        m = self._module_with(sentinel)
+        m.post_auto_model_init()
+        assert m._model_backend is sentinel, "clobbered a backend another adapter in the MRO attached"
+
+    def test_the_engine_is_still_wrapped_when_the_backend_is_left_alone(self, monkeypatch):
+        """Not overriding the BACKEND must not skip the WRAP.
+
+        They are separate responsibilities, and guarding both under one condition would disable capture in exactly the
+        composed case.
+        """
+        import interp_engine_adapter.adapter as mod
+
+        monkeypatch.setattr(mod._Seam, "wrap_model", staticmethod(lambda *a, **k: "engine"))
+        m = self._module_with(object())
+        m.post_auto_model_init()
+        assert m.engine_model == "engine"
+
+
 class TestModelBackend:
     """The backend claims exactly what it implements, and refuses what it does not."""
 
