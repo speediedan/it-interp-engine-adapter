@@ -9,6 +9,15 @@ adapters:
       adapters: [core, interp_engine]
     - component: module
       adapters: [lightning, interp_engine]
+    # CONDITIONAL, and the `requires` is what keeps this manifest honest. Without it the manifest
+    # would advertise three compositions to every reader while an environment without circuit-tracer
+    # yields two, with nothing saying so -- the declarative version of exactly the silent loss the
+    # rails' per-composition skip reporting exists to remove. The rails evaluate this and hand the
+    # entrypoint the satisfiable set; `register_adapter_ctx` registers that set and no more.
+    - component: module
+      adapters: [core, interp_engine, circuit_tracer]
+      requires:
+        pip: ["circuit-tracer"]
 
 requires:
   # interp-engine's 1.x line changes signatures between minors with no deprecation aliases, by
