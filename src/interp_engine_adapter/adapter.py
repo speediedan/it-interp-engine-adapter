@@ -181,16 +181,35 @@ class _Seam:
 
     @staticmethod
     def steer(engine_model: Any, tokens: Any, specs: list[Any]) -> Any:
-        """Run one forward pass with steering applied, returning logits.
+        """Run one forward pass with steering applied AT THE LAST PROMPT POSITION, returning logits.
 
         ``steer`` is a CONTEXT MANAGER yielding a hook manager, not a call, so the forward has to
         happen inside it. Keeping that shape here rather than in the backend is the point of the seam:
         if the engine changes how steering is entered, exactly one method moves.
-        """
-        from interp_engine import steer
 
-        with steer(engine_model, specs):
-            return engine_model.forward(tokens)
+        NOTE [the position mask is not an optimisation]: interp-engine steers EVERY prompt position by
+        default. Interpretune's intervention contract is the last token: its bundled backends route
+        through ``apply_intervention_to_last_token``, and an op written against them means that. Passing
+        the engine's default through would have applied the caller's vector at all five positions of a
+        five-token prompt while the caller asked for one, and the forward would have completed and
+        returned a plausible result.
+
+        That is this adapter's own defect class reached through a DEFAULT rather than through a hook
+        name: nothing raises, the shapes agree, and only the meaning differs. So the mask is applied
+        here, where the two vocabularies meet, rather than left to a caller who has no reason to know
+        the engine disagrees.
+
+        ``position_mask`` EXCLUDES positions, so excluding every position but the last is how the
+        engine spells "last token only". Measured on gpt2 layer 5: without the mask all 5 of 5
+        positions change; with it exactly 1 does, and the resulting logits match a hand-built
+        HuggingFace reference that adds the same vector at the same position to 0.0.
+        """
+        from interp_engine import run_with_cache, steer
+
+        n_positions = _prompt_length(tokens)
+        mask = list(range(n_positions - 1)) if n_positions and n_positions > 1 else None
+        with steer(engine_model, specs, prompt_token_ids=tokens, position_mask=mask):
+            return run_with_cache(engine_model, tokens, []).output
 
     @staticmethod
     def steer_spec(
@@ -203,8 +222,21 @@ class _Seam:
 
     @staticmethod
     def forward(engine_model: Any, tokens: Any) -> Any:
-        """A plain forward pass, no capture and no steering."""
-        return engine_model.forward(tokens)
+        """A plain forward pass, no capture and no steering.
+
+        ``EagerModel`` has no ``forward`` attribute and its instances are not callable. This said
+        ``engine_model.forward(tokens)`` from the first commit and therefore never worked, against 1.3.6
+        or 1.5.1 alike: not a regression, a path nothing exercised. The seam's contract tests read
+        signatures and registry membership, which is the surface a minor bump moves, and never CALLED
+        this, so a method that does not exist passed every one of them.
+
+        A forward is a capture of NO points: `run_with_cache` returns a ``Cache`` whose ``.output`` is
+        the model output. Verified equal to the HF forward to 0.0 on gpt2, which is the expected result
+        rather than a tolerance, since the engine wraps the HF model in place and runs its forward.
+        """
+        from interp_engine import run_with_cache
+
+        return run_with_cache(engine_model, tokens, []).output
 
     async def capture_async(engine_model: Any, tokens: Any, points: list[Any], detach: bool = True) -> Any:
         """The notebook path: one forward pass capturing the requested points, awaited.
@@ -382,6 +414,19 @@ def _require_expressible_operand(tensor: Any, hook_name: str) -> Any:
     return tensor
 
 
+def _prompt_length(tokens: Any) -> int:
+    """Number of prompt positions in ``tokens``, or 0 when it cannot be told.
+
+    Returning 0 rather than guessing 1 matters: the caller uses this to build a last-position mask, and
+    a wrong length would mask the wrong positions silently. When the shape cannot be read, no mask is
+    applied and the engine's own behaviour stands, which is visible rather than subtly wrong.
+    """
+    shape = getattr(tokens, "shape", None)
+    if shape is None:
+        return 0
+    return int(shape[-1]) if len(shape) >= 1 else 0
+
+
 def _intervention_targets(interventions: Any, model: Any) -> list[tuple[int, str, Any]]:
     """Yield ``(layer, engine point, spec)`` for each intervention, via the same seam capture uses.
 
@@ -406,7 +451,14 @@ def _intervention_targets(interventions: Any, model: Any) -> list[tuple[int, str
         layer = getattr(address, "layer", None)
         if layer is None:
             raise UnmappableHookError(f"{hook_name!r} does not name a layer, so it cannot be steered")
-        for spec in specs if isinstance(specs, (list, tuple)) else [specs]:
+        # A NamedTuple IS a tuple, so a bare `InterventionSpec` would otherwise be treated as a SEQUENCE
+        # of specs and iterated into its own FIELDS. The first field is a tensor, which then reaches
+        # `spec.intervention_tensor` as an AttributeError naming nothing useful. `_fields` is what
+        # distinguishes the two, and interpretune's `InterventionSpec` is exactly that shape.
+        #
+        # The bundled backends never meet this because they normalize to a list before iterating; this
+        # seam takes the caller's value directly, so telling a spec from a sequence of specs is its job.
+        for spec in [specs] if hasattr(specs, "_fields") or not isinstance(specs, (list, tuple)) else specs:
             targets.append((layer, getattr(address, "name", "resid_post"), spec))
     return targets
 
