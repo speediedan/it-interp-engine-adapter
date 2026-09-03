@@ -15,35 +15,58 @@ Consumers load it with `it.hub.pull("speediedan/it-interp-engine-adapter")` behi
 
 ## The entrypoint is executed as a single file, and that constrains everything
 
-`src/interp_engine_adapter.py` is run by the hub loader via `spec_from_file_location` straight out of
-the snapshot, under a revision-scoped synthetic module name (`it_hub_adapters.<repo>.<revision>`), so
-two cached revisions cannot collide in `sys.modules`.
+`src/interp_engine_adapter/adapter.py` is run by the hub loader via `spec_from_file_location` straight
+out of the snapshot, under a revision-scoped synthetic module name (`it_hub_adapters.<repo>.<revision>`),
+so two cached revisions cannot collide in `sys.modules`.
+
+**`adapter.py`, not `__init__.py`, is the entrypoint, and the directory is a package only for the pip
+path.** `build_component_tree` stages exactly what the manifest names plus the manifest itself, so the
+published snapshot holds `adapter.py` and `it_component.yaml` and no `__init__.py`: the loader has no
+sibling available to import even if the entrypoint asked for one. Verified by staging and executing it.
 
 Three consequences that are easy to violate:
 
-- **It cannot import sibling modules from this repo.** There is no package context. Splitting the
-  entrypoint into helper modules breaks hub loading while leaving `pytest` green, because the tests
-  import the pip-installed form. If the file grows, it grows in place.
+- **The entrypoint cannot import sibling modules from this repo.** There is no package context at hub
+  load. Splitting it into helper modules breaks hub loading while leaving `pytest` green, because the
+  tests import the pip-installed form. If the file grows, it grows in place. `__init__.py` *does* import
+  a sibling, and that is not an exception to this rule: the loader never executes it, only pip consumers
+  do, and package context is real on that path.
 - **The loader never touches `sys.path`.** Hub consumers reach the module through
   `interpretune.hub.adapters.loaded_adapter_module(component)`, never `import interp_engine_adapter`.
   That plain import is for pip-install consumers and for this repo's own tests only.
 - **`it_component.yaml`'s `adapters.entrypoint` must track the file's path.** A subdirectory path is
   supported (the loader resolves `snapshot / entrypoint` verbatim); a stale one fails only at load.
 
-## Packaging: the src layout needs both halves stated
+## Packaging: the manifest ships as package data
 
-A single top-level *module* under `src/` is not auto-discoverable, because setuptools' src-layout
-autodiscovery finds *packages*. `pyproject.toml` therefore states `package-dir = {"" = "src"}` **and**
-`py-modules = ["interp_engine_adapter"]`. Drop either and `pip install -e .` builds a distribution
-with no importable module, which surfaces as an ImportError in the tests rather than at install time.
+`src/interp_engine_adapter/` is a package, declared with `package-dir = {"" = "src"}` and
+`packages = ["interp_engine_adapter"]`, and `it_component.yaml` ships inside it through `package-data`.
+There is exactly **one** copy of that manifest in the repo. If you need it somewhere else, move it and
+update `adapters.entrypoint`; do not add a second copy, because drift between a root manifest and a
+shipped one fails only at hub load, which nothing in CI reaches.
 
-Verify a packaging change by building, not by importing from the working tree:
+**Do not ship the manifest with `[tool.setuptools.data-files]`.** Measured: that lands it at the install
+root (`<prefix>/it_component.yaml`), so every component publishing a manifest that way overwrites the
+last one installed, and a lookup answers plausibly for a different component entirely.
+
+Verify a packaging change by building, and **delete `build/` first**. setuptools does not prune that
+tree between builds, so after a layout change it holds the old module *and* the new one, and the wheel
+contains a file that no longer exists in the source. That is a stale artifact reading as a real result:
 
 ```bash
+rm -rf build dist src/*.egg-info
 python -m pip wheel . --no-deps -w /tmp/iea && python - <<'PY'
 import zipfile, glob; print(zipfile.ZipFile(glob.glob('/tmp/iea/*.whl')[0]).namelist())
 PY
 ```
+
+The wheel must contain `interp_engine_adapter/adapter.py`, `interp_engine_adapter/__init__.py` and
+`interp_engine_adapter/it_component.yaml`, and **no top-level `interp_engine_adapter.py`**.
+
+`pytest` sees only the pip path (`TestPipInstallSurface`). Nothing in CI exercises the hub path, so
+verify that by hand after any layout or manifest change: stage with
+`interpretune.hub.publish.build_component_tree`, then execute the staged entrypoint by path under a
+synthetic module name and confirm a `vars()` scan finds `InterpEngineAdapter`.
 
 ## The seam, and the refusal that is the point of this adapter
 

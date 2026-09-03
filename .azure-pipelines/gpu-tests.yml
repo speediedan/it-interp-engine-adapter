@@ -27,7 +27,6 @@ trigger:
       - src/**
       - tests/**
       - pyproject.toml
-      - it_component.yaml
       - .azure-pipelines/**
       - scripts/gpu_lease_wrap.sh
     exclude:
@@ -43,7 +42,6 @@ pr:
       - src/**
       - tests/**
       - pyproject.toml
-      - it_component.yaml
       - .azure-pipelines/**
       - scripts/gpu_lease_wrap.sh
     exclude:

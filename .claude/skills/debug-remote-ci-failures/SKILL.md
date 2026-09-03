@@ -136,18 +136,22 @@ only there: an engine call that bypasses the seam is the actual defect.
 
 Symptom: `ModuleNotFoundError: interp_engine_adapter` after a successful install.
 
-A single top-level module under `src/` is not auto-discoverable. `pyproject.toml` must carry **both**
-`package-dir = {"" = "src"}` and `py-modules = ["interp_engine_adapter"]`. Drop either and the built
-distribution contains no importable module, which surfaces as an ImportError at test time rather than
-at install time. Reproduce by building, not by importing from the working tree:
+`pyproject.toml` must carry `package-dir = {"" = "src"}` and `packages = ["interp_engine_adapter"]`,
+with `it_component.yaml` shipped through `[tool.setuptools.package-data]`. Reproduce by building, not by
+importing from the working tree, and **delete `build/` first**: setuptools does not prune that tree, so
+after any layout change it holds the previous layout too and the wheel names a file that no longer
+exists in the source. A stale artifact of this kind reads exactly like a real result.
 
 ```bash
+rm -rf build dist src/*.egg-info
 python -m pip wheel . --no-deps -w /tmp/iea
 python -c "import zipfile,glob; print(zipfile.ZipFile(glob.glob('/tmp/iea/*.whl')[0]).namelist())"
 ```
 
 Also check `it_component.yaml`'s `adapters.entrypoint` still matches the file's path, because a stale value
-fails only at hub load, which CI does not currently exercise.
+fails only at hub load, which CI does not currently exercise. `tests/test_seam.py::TestPipInstallSurface`
+covers the pip surface; **nothing in CI covers the hub surface**, so verify that by hand: stage with
+`interpretune.hub.publish.build_component_tree` and execute the staged entrypoint by path.
 
 ### E. A genuine adapter defect
 
