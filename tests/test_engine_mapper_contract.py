@@ -60,8 +60,11 @@ class TestPreAndPostNormInputsAreNotTheSamePoint:
         [("hook_mlp_in", "mlp.hook_in"), ("hook_attn_in", "attn.hook_in")],
     )
     def test_the_block_hook_does_not_resolve_to_the_sublayer_point(self, mappers, block_hook, sublayer_hook):
-        """The load-bearing assertion. If both spellings answer with the same point, one of them is
-        wrong by a whole normalization, and nothing in the engine says which."""
+        """The load-bearing assertion.
+
+        If both spellings answer with the same point, one of them is wrong by a whole normalization, and nothing in the
+        engine says which.
+        """
         block = _point(mappers, f"blocks.5.{block_hook}")
         sublayer = _point(mappers, f"blocks.5.{sublayer_hook}")
 
@@ -88,8 +91,8 @@ class TestPreAndPostNormInputsAreNotTheSamePoint:
 
     @pytest.mark.parametrize("block_hook", ["hook_mlp_in", "hook_attn_in"])
     def test_the_refusal_names_both_alternatives(self, mappers, block_hook):
-        """A refusal that does not say what to ask for instead sends the caller back to guessing, which
-        is the behaviour being removed."""
+        """A refusal that does not say what to ask for instead sends the caller back to guessing, which is the
+        behaviour being removed."""
         with pytest.raises(mappers.UnmappedHook) as excinfo:
             mappers.tlens_hook_to_point(f"blocks.5.{block_hook}")
         message = str(excinfo.value)
