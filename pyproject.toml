@@ -10,8 +10,26 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 dependencies = ["interp-engine~=1.5.1"]
 
+# THE FORK PIN LIVES IN THE TEST EXTRA, NOT IN `dependencies`, and that placement is the whole design.
+#
+# `tests/test_engine_mapper_contract.py` proves the pre-norm/post-norm defect is real by routing through
+# the engine's own `tlens_hook_to_point`, so it is RED on the released engine and GREEN on the fork
+# carrying the refusal. Proving that needs the fork installed; SHIPPING it to consumers does not.
+#
+# Putting the fork in `dependencies` would push a personal fork of a third-party library onto everyone
+# who pip-installs this adapter, to buy them nothing: `_Seam.point_for` already refuses those hook names
+# regardless of what the engine does, so a consumer on the released engine is protected by this
+# component either way. The fork buys evidence, and evidence belongs in the test extra.
+#
+# RETIRING IT IS ONE LINE. When the fix lands upstream and the released engine refuses these hooks, drop
+# this entry and the contract test keeps passing unchanged, because it asserts the CORRECT BEHAVIOUR
+# rather than the presence of a fork. A fork pin left in place is how a fork becomes a maintenance
+# surface (AGENTS.md); this one is built to be removable without touching a test.
 [project.optional-dependencies]
-test = ["pytest"]
+test = [
+    "pytest",
+    "interp-engine @ git+https://github.com/speediedan/interp-engine.git@fix/prenorm-block-hooks-are-refused",
+]
 
 # A PACKAGE rather than a flat module, and the manifest ships as package data inside it. That is what
 # lets the pip-install path and the hub path resolve the SAME `it_component.yaml` through one predicate,
