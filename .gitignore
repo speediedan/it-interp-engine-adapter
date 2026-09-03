@@ -191,5 +191,5 @@ CLAUDE.local.md
 .claude/settings.local.json
 
 # One-shot bypass for the benchmark registry's clean-tree guard. Consumed on use; never committed,
-# because a bypass that reaches other checkouts disarms the guard for everyone (see #275).
+# because a bypass that reaches other checkouts disarms the guard for everyone (see speediedan/interpretune#275).
 tests/benchmarks/benchmark_update.allow

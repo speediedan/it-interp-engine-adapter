@@ -101,13 +101,13 @@ gh run list --limit 3                                     # is CI red on this to
 ```
 
 **A green CI run beside a local red is evidence about your environment, not about the code.** If CI is
-genuinely red on the same import, then it is drift. Do not fix it by weakening the test; raise it
-with the `ie-integration` session or file it against interpretune.
+genuinely red on the same import, then it is drift. Do not fix it by weakening the test; file it
+against interpretune, where the change that caused it lives.
 
 ### B. An undeclared dependency upstream
 
 All three call sites now track `interpretune @ git+...@main` and install **nothing else by hand**. The
-`transformer-lens` / `sae-lens` pins are gone (interpretune#401's follow-up, `c3423a5`), so this repo
+`transformer-lens` / `sae-lens` pins are gone (speediedan/interpretune#401's follow-up, `c3423a5`), so this repo
 no longer cushions interpretune's declaration gaps.
 
 That is deliberate and it changes what an install failure means. Previously a missing declaration
@@ -118,7 +118,7 @@ Now the same class fails loudly at import, in this job, on the commit that intro
 So an `ImportError` or `ModuleNotFoundError` at install or collection naming a package this repo never
 asked for is **evidence about interpretune's declarations**, not about this repo. Confirm by installing
 interpretune alone in a clean venv and importing the surface the entrypoint uses; if it fails there
-too, the fix belongs upstream (the shape is interpretune#403 and #401) rather than in a pin here.
+too, the fix belongs upstream (the shape is speediedan/interpretune#403 and speediedan/interpretune#401) rather than in a pin here.
 Re-adding a pin to make CI green would restore the masking that hid it.
 
 ### C. interp-engine minor-version signature change

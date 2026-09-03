@@ -51,10 +51,12 @@ cost one wrong diagnosis).
 
 `az-pipelines-ops` is repo-neutral, so it describes releasing a gate and registering a definition
 without naming the tools, which live in the maintainer's **private** admin repo. Those paths belong
-here or nowhere:
+here or nowhere. The wrapper scripts below live in the maintainer's private admin repo; a
+contributor without it uses `az pipelines` or the REST API directly, which is what the wrappers
+call:
 
 ```bash
-cd ~/repos/distributed-insight/project_admin/shared_admin_scripts/az_pipeline_agent_scripts
+cd <admin-scripts>/az_pipeline_agent_scripts   # maintainer-only convenience wrapper
 ./manage-approvals.sh -o speediedan -p interpretune -m list
 ./manage-approvals.sh -o speediedan -p interpretune -m approve -i "<approval_id>" -c "<why>"
 ./manage-pipelines.sh -o speediedan -p interpretune -m show -i <definitionId>

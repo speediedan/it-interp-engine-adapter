@@ -107,8 +107,8 @@ rather than being masked by a pin, which is the outcome worth having.
 
 **A local red naming a missing `interpretune` symbol is usually a stale environment, not a missing
 API.** `TestRegistration::test_registers_both_declared_compositions` needs `register_dynamic_adapter`,
-which requires interpretune at or after commit **`b1837d2`** (the hub-rails merge). Note that PR #398's
-squash subject cites the issue it closes, `#125`, rather than the PR, so grepping the log for `#398`
+which requires interpretune at or after commit **`b1837d2`** (the hub-rails merge). Note that PR speediedan/interpretune#398's
+squash subject cites the issue it closes, `speediedan/interpretune#125`, rather than the PR, so grepping the log for `speediedan/interpretune#398`
 finds nothing. Check what you actually resolved before concluding anything about the API:
 
 ```bash
@@ -187,12 +187,16 @@ pre-commit run --all-files
 - **Shipped docs must not reference agent workstreams.** `README.md`, this file and docstrings outlive
   the work that produced them and are read by users. Park an open decision on an **open issue** and
   cite the number; a workstream reference is invisible to a reader and lost when the session closes.
-  - **Check the reader can reach it.** This repo is PRIVATE and `interpretune` is PUBLIC, so an issue
-    number here, cited from there, is exactly as unreachable as the workstream reference the rule
-    exists to replace. When citing across that boundary, name the repo, say it is private, and carry a
-    two-sentence summary of what the issue decides, so a reader without access learns the shape rather
-    than meeting a pointer that reads as documented-elsewhere and is not. Revisit those summaries if
-    this repo goes public.
+  - **Qualify every issue citation with its repo.** GitHub renders a bare `#401` as a link to the
+    CURRENT repository, so a bare number here resolves to an issue in THIS repo -- which either does not
+    exist or exists and is unrelated. Every citation in this repo means an `interpretune` issue, so
+    write `speediedan/interpretune#401`. A wrong link that renders is worse than no link, because it
+    looks checked. Verified against every citation in the tree during the pre-flip docs audit.
+  - **Check the reader can reach it.** Cite only repos a reader can actually open. Everything this repo
+    references is public (`interpretune`, `circuit-tracer`, `skills`); the maintainer's admin repo is
+    not, so name it as private and describe the command rather than pointing at a path only one machine
+    has. The rule generalizes: if a citation is unreachable, it is exactly as useful as the workstream
+    reference the rule above exists to replace.
 - **No ephemeral CI references** (build numbers, run URLs, approval ids) in commit messages, code
   comments or anything else a future reader will meet without that context. Describe the environment
   shape and the symptom instead. Those ids belong in PR threads and workstream logs.
