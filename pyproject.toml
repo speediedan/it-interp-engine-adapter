@@ -13,14 +13,24 @@ dependencies = ["interp-engine~=1.3.0"]
 [project.optional-dependencies]
 test = ["pytest"]
 
-# A single top-level MODULE under src/ is not auto-discoverable: setuptools' src-layout autodiscovery
-# finds packages (directories with an __init__.py), and this component is deliberately one flat file
-# because the hub loader executes the entrypoint as a standalone file. So both halves are stated
-# explicitly -- without them `pip install -e .` builds a distribution containing no importable module
-# at all, and the failure surfaces as an ImportError in the tests rather than at install time.
+# A PACKAGE rather than a flat module, and the manifest ships as package data inside it. That is what
+# lets the pip-install path and the hub path resolve the SAME `it_component.yaml` through one predicate,
+# instead of one of them answering a weaker question.
+#
+# Do NOT ship the manifest via `[tool.setuptools.data-files]`. Measured: it lands at `<prefix>/`, the
+# install ROOT, so every component publishing a manifest that way overwrites the last one installed, and
+# a lookup then answers plausibly for a different component entirely.
+#
+# The entrypoint is `adapter.py`, not `__init__.py`: the loader stages and executes whatever
+# `adapters.entrypoint` names, and a published repo carrying `adapter.py` reads better than one carrying
+# `__init__.py`. `__init__.py` re-exports it for the pip path and the loader never executes it, which is
+# why that file may import a sibling while the entrypoint may not.
 [tool.setuptools]
 package-dir = { "" = "src" }
-py-modules = ["interp_engine_adapter"]
+packages = ["interp_engine_adapter"]
+
+[tool.setuptools.package-data]
+interp_engine_adapter = ["it_component.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import pytest
 
-from interp_engine_adapter import (
+# INTERNALS COME FROM `.adapter`, NOT FROM THE PACKAGE, and the distinction is load-bearing rather than
+# stylistic. `adapter.py` is the file the hub loader executes by path out of the snapshot; the package
+# `__init__` exists only for the pip path and the loader never runs it. Importing the module under test
+# directly means these tests exercise the same object a hub consumer gets. `TestPipInstallSurface` below
+# covers the other path deliberately, so a break in either is attributable.
+from interp_engine_adapter.adapter import (
     ADAPTER_NAME,
     InterpEngineAdapter,
     InterpEngineConfig,
@@ -90,7 +95,7 @@ class TestModelBackend:
 
     def test_claims_intervention_and_nothing_else(self):
         from interpretune.analysis.backends.capabilities import BackendCapability
-        from interp_engine_adapter import InterpEngineModelBackend
+        from interp_engine_adapter.adapter import InterpEngineModelBackend
 
         backend = InterpEngineModelBackend()
         assert backend.supports(BackendCapability.INTERVENTION)
@@ -105,7 +110,7 @@ class TestModelBackend:
             SupportsIntervention,
             SupportsLatentModels,
         )
-        from interp_engine_adapter import InterpEngineModelBackend
+        from interp_engine_adapter.adapter import InterpEngineModelBackend
 
         backend = InterpEngineModelBackend()
         assert isinstance(backend, ModelBackendCore)
@@ -117,14 +122,14 @@ class TestModelBackend:
         assert not isinstance(backend, ModelBackend)
 
     def test_latent_handles_are_refused_not_ignored(self):
-        from interp_engine_adapter import InterpEngineModelBackend, UnmappableHookError
+        from interp_engine_adapter.adapter import InterpEngineModelBackend, UnmappableHookError
 
         backend = InterpEngineModelBackend()
         with pytest.raises(UnmappableHookError, match="does not support latent-model handles"):
             backend.fwd_w_intervention(None, {"input_ids": None}, {}, latent_model_handles=[object()])
 
     def test_a_callable_names_filter_is_refused_rather_than_under_capturing(self):
-        from interp_engine_adapter import InterpEngineModelBackend, UnmappableHookError
+        from interp_engine_adapter.adapter import InterpEngineModelBackend, UnmappableHookError
 
         backend = InterpEngineModelBackend()
         with pytest.raises(UnmappableHookError, match="callable names_filters"):
@@ -141,7 +146,7 @@ class TestInterventionTargetsAreModelAware:
     """
 
     def test_a_null_model_is_refused(self):
-        from interp_engine_adapter import UnmappableHookError, _intervention_targets
+        from interp_engine_adapter.adapter import UnmappableHookError, _intervention_targets
 
         with pytest.raises(UnmappableHookError, match="a model is required"):
             _intervention_targets({"blocks.5.hook_mlp_out": object()}, None)
@@ -164,7 +169,7 @@ class TestInterventionTargetsAreModelAware:
 
 
 def _seam_alias_table() -> dict:
-    from interp_engine_adapter import _Seam
+    from interp_engine_adapter.adapter import _Seam
 
     return _Seam._SUBLAYER_INPUT_ALIASES
 
@@ -179,13 +184,13 @@ class TestInterventionModeIsHonoured:
     """
 
     def test_add_maps_to_additive(self):
-        from interp_engine_adapter import _steer_method_for
+        from interp_engine_adapter.adapter import _steer_method_for
 
         assert _steer_method_for("add") == "additive"
 
     @pytest.mark.parametrize("mode", ["replace", "patch", "project"])
     def test_modes_that_need_the_current_activation_are_refused(self, mode):
-        from interp_engine_adapter import UnmappableHookError, _steer_method_for
+        from interp_engine_adapter.adapter import UnmappableHookError, _steer_method_for
 
         with pytest.raises(UnmappableHookError, match=f"intervention mode {mode!r} cannot be expressed"):
             _steer_method_for(mode)
@@ -194,7 +199,7 @@ class TestInterventionModeIsHonoured:
         """Positive control: the mapping table must name real engine methods, not aspirational ones."""
         from interp_engine import STEER_METHODS
 
-        from interp_engine_adapter import _MODE_TO_STEER_METHOD
+        from interp_engine_adapter.adapter import _MODE_TO_STEER_METHOD
 
         for mode, method in _MODE_TO_STEER_METHOD.items():
             assert method in STEER_METHODS, f"{mode!r} maps to {method!r}, absent from {STEER_METHODS}"
@@ -221,7 +226,7 @@ class TestInterventionModeIsHonoured:
 
 
 def _mode_table() -> dict:
-    from interp_engine_adapter import _MODE_TO_STEER_METHOD
+    from interp_engine_adapter.adapter import _MODE_TO_STEER_METHOD
 
     return _MODE_TO_STEER_METHOD
 
@@ -272,7 +277,7 @@ class TestTheProjectOrthogonalBoundaryIsGuardedByCode:
         assert torch.allclose(h + OrthogonalProjector(v).delta(h, 0.0), h - parallel, atol=1e-6)
 
     def test_project_is_still_refused(self):
-        from interp_engine_adapter import UnmappableHookError, _steer_method_for
+        from interp_engine_adapter.adapter import UnmappableHookError, _steer_method_for
 
         with pytest.raises(UnmappableHookError):
             _steer_method_for("project")
@@ -290,7 +295,7 @@ class TestSpanOperandsAreRefused:
     def test_a_span_operand_is_refused_with_the_reason(self):
         import torch
 
-        from interp_engine_adapter import UnmappableHookError, _require_expressible_operand
+        from interp_engine_adapter.adapter import UnmappableHookError, _require_expressible_operand
 
         with pytest.raises(UnmappableHookError, match="rank-one"):
             _require_expressible_operand(torch.randn(2, 8), "blocks.5.mlp.hook_in")
@@ -298,7 +303,7 @@ class TestSpanOperandsAreRefused:
     def test_a_single_direction_passes_through(self):
         import torch
 
-        from interp_engine_adapter import _require_expressible_operand
+        from interp_engine_adapter.adapter import _require_expressible_operand
 
         v = torch.randn(8)
         assert _require_expressible_operand(v, "blocks.5.mlp.hook_in") is v
@@ -359,7 +364,7 @@ class TestAsyncCaptureSeam:
     def test_capture_async_is_a_coroutine_function(self):
         import inspect
 
-        from interp_engine_adapter import _Seam
+        from interp_engine_adapter.adapter import _Seam
 
         assert inspect.iscoroutinefunction(_Seam.capture_async)
 
@@ -379,3 +384,40 @@ class TestAsyncCaptureSeam:
 
         params = list(inspect.signature(EagerModel.capture).parameters)
         assert params[:3] == ["self", "prompt_token_ids", "points"], params
+
+
+class TestPipInstallSurface:
+    """The pip path, which is the ONLY path `pytest` can see. The hub path is verified separately.
+
+    A hub consumer never imports this package: the loader executes `adapter.py` by path under a
+    revision-scoped synthetic name. A pip consumer does, and re-exporting from `__init__` is what keeps
+    `from interp_engine_adapter import InterpEngineAdapter` working across the package restructure. That
+    is a real consumer contract, so it gets a test rather than an assumption.
+    """
+
+    def test_the_public_surface_is_reachable_from_the_package(self):
+        import interp_engine_adapter as pkg
+
+        for name in ("ADAPTER_NAME", "InterpEngineAdapter", "InterpEngineConfig", "InterpEngineModule"):
+            assert hasattr(pkg, name), f"{name} is not re-exported for pip consumers"
+
+    def test_the_package_re_export_is_the_same_object_as_the_module(self):
+        """Not merely present: the SAME class. Two definitions would make an isinstance check fail in a
+        way that reads as a type error rather than as a packaging fault."""
+        import interp_engine_adapter as pkg
+        import interp_engine_adapter.adapter as mod
+
+        assert pkg.InterpEngineAdapter is mod.InterpEngineAdapter
+
+    def test_the_manifest_ships_as_package_data(self):
+        """`it_component.yaml` must resolve BESIDE the installed module, not merely in the source tree.
+
+        Shipping it via `data-files` instead lands it at the install root, where components overwrite each other -- so
+        this asserts the location, not just the existence.
+        """
+        from pathlib import Path
+
+        import interp_engine_adapter.adapter as mod
+
+        manifest = Path(mod.__file__).parent / "it_component.yaml"
+        assert manifest.is_file(), f"manifest not installed beside the module: {manifest}"
