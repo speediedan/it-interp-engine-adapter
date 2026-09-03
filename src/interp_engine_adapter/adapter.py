@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from interpretune.adapters.registration import CompositionRegistry
-from interpretune.analysis.backends.capabilities import BackendCapability
+from interpretune.analysis.backends.capabilities import BackendCapability, get_model_backend
 from interpretune.analysis.ops.base import get_batch_input
 from interpretune.base import CoreHelperAttributes, BaseITModule
 from interpretune.protocol import Adapter
@@ -420,10 +420,18 @@ class InterpEngineCaptureMixin(InterpEngineAttributeMixin):
         """
         result = super().post_auto_model_init(*args, **kwargs)  # type: ignore[misc]
         model_id = getattr(getattr(self, "it_cfg", None), "model_name_or_path", "") or ""
-        # Attach the model backend the way bundled adapters do (`self._model_backend`). There is no
-        # model-backend REGISTRY to register into -- backends are adapter-attached by construction --
-        # so a hub adapter reaches this seam exactly as a bundled one does.
-        self._model_backend = InterpEngineModelBackend()
+        # ATTACH, DO NOT OVERRIDE. Attaching the backend the way bundled adapters do (`self._model_backend`)
+        # is right; assigning it unconditionally was not. In a composition where another adapter also
+        # attaches one -- which is how a third adapter composes with this one -- an unconditional assignment
+        # makes MRO ORDER silently decide which backend wins, and the loser's capabilities disappear with no
+        # error at the point of loss. Interpretune's circuit-tracer adapter states this contract explicitly
+        # and honours it; a hub adapter that did not would be the reason a composition including it behaved
+        # differently from one that did not, which is a defect nobody would look for here.
+        #
+        # There is no model-backend REGISTRY to register into (backends are adapter-attached by
+        # construction), so a hub adapter reaches this seam exactly as a bundled one does.
+        if get_model_backend(self) is None:
+            self._model_backend = InterpEngineModelBackend()
         self._engine_model = _Seam.wrap_model(
             self.model,  # type: ignore[attr-defined]
             getattr(self, "tokenizer", None),
