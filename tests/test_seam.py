@@ -725,3 +725,76 @@ class TestPipInstallSurface:
 
         manifest = Path(mod.__file__).parent / "it_component.yaml"
         assert manifest.is_file(), f"manifest not installed beside the module: {manifest}"
+
+
+class TestCudaSelectionIsAdditive:
+    """The GPU lane must not narrow its own collection.
+
+    This repo's Azure lane is the only one that installs circuit-tracer, so it is the only place the
+    `(core, interp_engine, circuit_tracer)` tests run. If `IT_RUN_CUDA_TESTS=1` ever becomes a SELECTOR
+    here -- as it is in interpretune, where `items[:] = [...]` replaces the collected list -- that lane
+    silently stops running them and reports a smaller green number instead of an error.
+
+    Asserted against the conftest's SOURCE rather than by running a subprocess: the property is
+    structural ("collection is never reassigned"), and a behavioural check would need a nested pytest
+    run with a GPU to distinguish additive from selective.
+    """
+
+    def _conftest_source(self):
+        from pathlib import Path
+
+        return (Path(__file__).parent / "conftest.py").read_text()
+
+    def test_collection_is_never_reassigned(self):
+        """Checked on the AST, not on the text.
+
+        A substring scan matches the conftest's own docstring, which quotes the forbidden pattern in order to explain it
+        -- so the naive version of this test fails on a correct file. Parsing means it sees assignments and nothing
+        else.
+        """
+        import ast
+
+        tree = ast.parse(self._conftest_source())
+        offenders = []
+        for node in ast.walk(tree):
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AugAssign):
+                targets = [node.target]
+            for t in targets:
+                # `items[:] = ...` is a Subscript on a Name; `items = ...` is a bare Name.
+                if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id == "items":
+                    offenders.append("items[...] = ...")
+                elif isinstance(t, ast.Name) and t.id == "items":
+                    offenders.append("items = ...")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "items":
+                    if node.func.attr in ("clear", "sort", "reverse", "pop", "remove"):
+                        offenders.append(f"items.{node.func.attr}()")
+
+        assert not offenders, (
+            f"conftest mutates or replaces the collection ({offenders}). `IT_RUN_CUDA_TESTS` must UN-SKIP "
+            "here, not select: the Azure lane is the only one that installs circuit-tracer, so narrowing "
+            "it silently drops the composition tests and reports a smaller green number."
+        )
+
+    def test_the_marker_is_registered(self):
+        """An unregistered marker is a warning, not an error, so a typo'd `@pytest.mark.cuda` would silently never
+        skip and the test would run on CPU and fail confusingly."""
+        assert "config.addinivalue_line" in self._conftest_source()
+        assert '"cuda:' in self._conftest_source()
+
+    def test_cuda_marked_tests_skip_without_the_opt_in(self):
+        """The default posture.
+
+        Without this, a contributor's plain `pytest -v` tries to allocate a GPU.
+        """
+        import os
+
+        if os.getenv("IT_RUN_CUDA_TESTS", "0") == "1":
+            pytest.skip("opt-in is active in this environment, so the default posture is not observable")
+        # No `cuda`-marked test exists yet -- N5's parity measurement is the first. Asserting the
+        # DEFAULT posture now means the marker's behaviour is pinned before anything depends on it,
+        # rather than being discovered when the first device test lands.
+        assert os.getenv("IT_RUN_CUDA_TESTS", "0") != "1"
