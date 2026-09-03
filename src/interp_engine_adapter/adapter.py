@@ -104,6 +104,24 @@ class _Seam:
         return None, hook_name
 
     @classmethod
+    def refuse_if_ambiguous(cls, bare_hook: str) -> None:
+        """Raise if a BARE hook name (no ``blocks.N.`` prefix) is one this adapter refuses to translate.
+
+        The guard circuit-tracer's resolver is wrapped with. It asks this seam the same question the two-way
+        compositions ask, so a hook the adapter refuses in one composition is not quietly accepted in another.
+
+        Only the adapter's OWN refusal propagates. Anything else -- a name needing a model to resolve, a name the engine
+        simply does not know -- is left to the caller's own resolution path, because this is a guard against a specific
+        silent substitution, not a second opinion on every hook name.
+        """
+        try:
+            cls.point_for(f"blocks.0.{bare_hook}", None)
+        except UnmappableHookError:
+            raise
+        except Exception:
+            return
+
+    @classmethod
     def point_for(cls, hook_name: str, model: Any) -> Any:
         """Translate a TransformerLens hook name to an engine ``Address``, refusing the ambiguous ones.
 
@@ -454,6 +472,97 @@ class InterpEngineModule(InterpEngineCaptureMixin, CoreHelperAttributes, BaseInt
     """The ``(core, interp_engine)`` module composition."""
 
 
+#: Cache for the composed circuit-tracer pairing class. Built once, lazily, because constructing it
+#: imports circuit-tracer, and this module MUST import without it: the two core compositions are the
+#: ones that have to work in an environment that never installed the optional package.
+_CT_PAIRING: Any = None
+
+
+def _circuit_tracer_pairing() -> Any:
+    """The ``(core, interp_engine, circuit_tracer)`` module class, or ``None`` where unavailable.
+
+    LAZY BY NECESSITY, not by preference. `interpretune.adapters.circuit_tracer.adapter` imports
+    circuit-tracer eagerly at module level -- correct for a module whose classes subclass circuit-tracer's
+    -- so touching it at import time here would make an OPTIONAL dependency mandatory for the two
+    compositions that do not need it, and the failure would land at hub load rather than at registration.
+    """
+    global _CT_PAIRING
+    if _CT_PAIRING is not None:
+        return _CT_PAIRING
+    try:
+        from interpretune.adapters.circuit_tracer.adapter import (
+            BaseCircuitTracerModule,
+            CircuitTracerAdapter,
+            CircuitTracerAnalysisMixin,
+        )
+    except Exception:
+        return None
+
+    class CircuitTracerInterpEngineModuleMixin(InterpEngineAttributeMixin):
+        """The pairing-specific layer, and the reason it exists is a refusal rather than a feature.
+
+        Circuit-tracer resolves a transcoder set's TransformerLens hook names through
+        ``interp_engine.mappers.tlens_hook_to_point``. That mapper resolves TL's BLOCK-LEVEL
+        ``hook_mlp_in``/``hook_attn_in`` -- which fire on the residual stream BEFORE the block norm -- to
+        the engine's ``mlp_in``/``attn_in``, which are the norm's OUTPUT. Those are a whole normalization
+        apart: measured on gemma-3-1b-it, cosine 0.175 at layer 5 and a magnitude ratio reaching ~3000x
+        deeper in the stack.
+
+        This adapter refuses that substitution in its two-way compositions. A three-way composition that
+        silently regained it would be worse than not shipping one at all, because the refusal in the other
+        two is what tells a user this adapter is careful about the distinction. So the guard is reinstated
+        HERE, at the boundary where the caller named the hook.
+
+        Circuit-tracer special-cases ``ln1/ln2.hook_normalized`` (the hooks the mapper refuses) but not
+        these two (the ones it silently mis-resolves), so nothing downstream catches it.
+        """
+
+        def post_auto_model_init(self, *args: Any, **kwargs: Any) -> Any:
+            result = super().post_auto_model_init(*args, **kwargs)  # type: ignore[misc]
+            self._guard_feature_hook_resolution()
+            return result
+
+        def _guard_feature_hook_resolution(self) -> None:
+            """Route circuit-tracer's hook resolution through this adapter's seam first.
+
+            Wraps the INSTANCE rather than subclassing, because circuit-tracer validates the replacement model by class
+            NAME (`type(m).__name__ != CT_BACKEND_REGISTRY[backend]`), so a subclass would be rejected as the wrong
+            model for the backend.
+            """
+            model = getattr(self, "_replacement_model", None)
+            resolve = getattr(model, "_resolve_feature_hook", None)
+            if resolve is None or getattr(resolve, "_it_seam_guarded", False):
+                return
+
+            def guarded(hook: str, _inner: Any = resolve) -> Any:
+                _Seam.refuse_if_ambiguous(hook)
+                return _inner(hook)
+
+            guarded._it_seam_guarded = True  # type: ignore[attr-defined]
+            model._resolve_feature_hook = guarded
+
+    class CircuitTracerInterpEngineModule(
+        CircuitTracerInterpEngineModuleMixin,
+        CircuitTracerAnalysisMixin,
+        CircuitTracerAdapter,
+        CoreHelperAttributes,
+        BaseCircuitTracerModule,
+        BaseInterpEngineModule,
+    ):
+        """The ``(core, interp_engine, circuit_tracer)`` module composition.
+
+        Base order mirrors the bundled pairings exactly (``CircuitTracerNNsightModule`` puts
+        ``BaseNNsightModule`` last, where ``BaseInterpEngineModule`` sits here): the pairing mixin wins,
+        then circuit-tracer's own layers, then the partner backend's base. The only difference from the
+        bundled cases is WHO defines it -- circuit-tracer owns the TL and nnsight pairings because it
+        arrived after both, and this component owns its own because it arrived after circuit-tracer. Same
+        shape, same precedence, different owner.
+        """
+
+    _CT_PAIRING = CircuitTracerInterpEngineModule
+    return _CT_PAIRING
+
+
 class InterpEngineModelBackend:
     """The engine as an interpretune ``ModelBackend``: required core plus ``INTERVENTION``.
 
@@ -555,19 +664,79 @@ class InterpEngineAdapter:
     Discovered by the rails via ``register_adapter_ctx``.
     """
 
+    #: Every composition this component can register, with what each needs. Data rather than branches so
+    #: the manifest and the code can be compared entry for entry: the manifest's `requires` decides which
+    #: of these the RAILS consider satisfiable, and `_needs_circuit_tracer` is how the same question gets
+    #: answered on the direct-import path, where no manifest was consulted.
+    _COMPOSITIONS = (
+        ((Adapter.core, ADAPTER_NAME), False, "interp-engine eager-tier adapter composed with core."),
+        (
+            (Adapter.lightning, ADAPTER_NAME),
+            False,
+            "interp-engine eager-tier adapter composed with the Lightning adapter.",
+        ),
+        (
+            (Adapter.core, ADAPTER_NAME, Adapter.circuit_tracer),
+            True,
+            "interp-engine composed with circuit-tracer attribution, on top of core.",
+        ),
+    )
+
+    @staticmethod
+    def _composition_key(combination: tuple[Any, ...]) -> tuple[str, ...]:
+        """The rails' identity for a composition: component plus its adapter names, value-sorted.
+
+        `getattr(a, "value", a)` rather than `str()`, mirroring the rails' own normalization exactly, and
+        that is not a style choice: `str(Adapter.core)` is ``'Adapter.core'``, so a key built with `str()`
+        never matches the rails' key built from manifest STRINGS. Every composition is then judged
+        unsupported and skipped SILENTLY, because skipping an unsatisfiable composition is the documented
+        correct outcome. The failure surfaces later as "satisfiable composition did not register", which
+        points at registration when the fault is one character of key construction.
+        """
+        names = sorted(str(getattr(a, "value", a)) for a in combination)
+        return ("module", *names)
+
     @classmethod
     def register_adapter_ctx(cls, adapter_ctx_registry: CompositionRegistry) -> None:
-        for combination, description in (
-            ((Adapter.core, ADAPTER_NAME), "interp-engine eager-tier adapter composed with core."),
-            (
-                (Adapter.lightning, ADAPTER_NAME),
-                "interp-engine eager-tier adapter composed with the Lightning adapter.",
-            ),
-        ):
+        """Register the compositions this environment can actually support.
+
+        TWO PATHS, and the difference between them is the whole point of one published component serving
+        every environment:
+
+        * Loaded through the hub rails, `supported_compositions()` returns the set the loader determined
+          is satisfiable from the manifest's per-composition `requires`. Register exactly that -- the
+          rails then check that every satisfiable composition registered, so under-registering is an
+          error rather than a quiet loss.
+        * Imported directly (`pip install`), it returns ``None``, meaning no manifest governs this
+          invocation. That is a named case, not a fallback: nothing evaluated the conditionality, so this
+          code answers the same question itself and registers what it knows it can support.
+        """
+        try:
+            from interpretune.hub.adapters import supported_compositions
+
+            supported = supported_compositions()
+        except ImportError:  # interpretune predating the per-composition `requires` rails
+            supported = None
+
+        for combination, needs_ct, description in cls._COMPOSITIONS:
+            if supported is None:
+                if needs_ct and _circuit_tracer_pairing() is None:
+                    continue
+            elif cls._composition_key(combination) not in supported:
+                continue
+            classes = (InterpEngineModule,) if not needs_ct else (_circuit_tracer_pairing(),)
+            if classes[0] is None:
+                # The rails called this composition satisfiable but the class will not build. Raising
+                # names the disagreement; skipping would leave the rails' own invariant to report it as
+                # a registration mismatch, which points at the wrong thing.
+                raise UnmappableHookError(
+                    f"composition {cls._composition_key(combination)} was reported satisfiable, but the "
+                    "circuit-tracer pairing class could not be built in this environment."
+                )
             adapter_ctx_registry.register(
                 ADAPTER_NAME,
                 component_key="module",
                 adapter_combination=combination,  # type: ignore[arg-type]
-                composition_classes=(InterpEngineModule,),
+                composition_classes=classes,
                 description=description,
             )

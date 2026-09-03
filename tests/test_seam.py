@@ -76,18 +76,251 @@ class TestSublayerInputRefusal:
         assert point.layer == 5
 
 
-class TestRegistration:
-    def test_registers_both_declared_compositions(self):
-        from interpretune.adapters.registration import CompositionRegistry, register_dynamic_adapter
+#: circuit-tracer is OPTIONAL and CI does not install it. Tests needing the real pairing class skip
+#: there and run locally; the tests that matter most for CI are the ABSENT-path ones, which is the
+#: environment CI actually has. Stated here rather than left to a reader, because a suite that silently
+#: skips its own subject is the failure mode this repo exists to avoid.
+_HAS_CT = True
+try:  # pragma: no cover - environment probe
+    import circuit_tracer  # noqa: F401
+    from interpretune.adapters.circuit_tracer.adapter import CircuitTracerAdapter  # noqa: F401
+except Exception:  # pragma: no cover
+    _HAS_CT = False
 
-        register_dynamic_adapter(ADAPTER_NAME, source="speediedan/it-interp-engine-adapter")
-        registry = CompositionRegistry()
+requires_ct = pytest.mark.skipif(not _HAS_CT, reason="circuit-tracer not installed (optional dependency)")
+
+
+def _names(registry):
+    """Composition keys as readable `a+b` strings, order-insensitive like the registry itself."""
+    return sorted(
+        "+".join(sorted(a.name if hasattr(a, "name") else str(a) for a in key[1:]))
+        for key in registry.available_compositions()
+    )
+
+
+def _fresh_registry():
+    from interpretune.adapters.registration import CompositionRegistry, register_dynamic_adapter
+
+    register_dynamic_adapter(ADAPTER_NAME, source="speediedan/it-interp-engine-adapter")
+    return CompositionRegistry()
+
+
+class TestRegistration:
+    def test_registers_the_unconditional_compositions(self):
+        registry = _fresh_registry()
         InterpEngineAdapter.register_adapter_ctx(registry)
 
-        keys = registry.available_compositions()
-        assert len(keys) == 2, f"expected the two declared compositions, got {keys}"
-        for key in keys:
-            assert registry.get(key) == (InterpEngineModule,)
+        names = _names(registry)
+        assert "core+interp_engine" in names
+        assert "interp_engine+lightning" in names
+        for key in registry.available_compositions():
+            if "circuit_tracer" not in str(key):
+                assert registry.get(key) == (InterpEngineModule,)
+
+
+class TestCompositionKeysMatchTheRails:
+    """The key this component builds must equal the key the rails build, or every composition is skipped.
+
+    Not a formality. The rails compare a component's registrations against the satisfiable set they
+    computed from the manifest, and a mismatched key looks exactly like "this composition is unavailable
+    here" -- the documented, correct outcome for something genuinely unsatisfiable. So a key bug does not
+    raise; it silently registers nothing and the diagnostic points at registration rather than at the key.
+    """
+
+    def test_key_matches_the_rails_key_for_every_declared_composition(self):
+        from interpretune.hub.adapters import _composition_key
+
+        for combination, _needs_ct, _desc in InterpEngineAdapter._COMPOSITIONS:
+            mine = InterpEngineAdapter._composition_key(combination)
+            theirs = _composition_key({"component": "module", "adapters": list(mine[1:])})
+            assert mine == theirs, f"key mismatch for {combination}: {mine} vs {theirs}"
+
+    def test_the_key_uses_adapter_name_not_str(self):
+        """`str(Adapter.core)` is 'Adapter.core'.
+
+        A key built with `str()` never matches, and the failure is silent. This asserts the actual trap rather than only
+        the happy path.
+        """
+        from interpretune.protocol import Adapter
+
+        assert str(Adapter.core) != Adapter.core.name, "premise changed; this guard may no longer be needed"
+        key = InterpEngineAdapter._composition_key((Adapter.core, ADAPTER_NAME))
+        assert key == ("module", "core", "interp_engine")
+        assert not any(seg.startswith("Adapter.") for seg in key)
+
+
+class TestConditionalCompositionRegistration:
+    """One published component, whatever compositions the environment supports.
+
+    The rails hand an executing entrypoint the SATISFIABLE set; a direct import gets `None`, meaning no
+    manifest governed this invocation, and the component answers the availability question itself.
+    """
+
+    def _register_with_supported(self, supported):
+        from interpretune.hub import adapters as hub_adapters
+
+        token = hub_adapters._SUPPORTED_COMPOSITIONS.set(supported)
+        try:
+            registry = _fresh_registry()
+            InterpEngineAdapter.register_adapter_ctx(registry)
+            return _names(registry)
+        finally:
+            hub_adapters._SUPPORTED_COMPOSITIONS.reset(token)
+
+    def test_rails_without_circuit_tracer_get_only_the_core_compositions(self):
+        names = self._register_with_supported(
+            (("module", "core", "interp_engine"), ("module", "interp_engine", "lightning"))
+        )
+        assert names == ["core+interp_engine", "interp_engine+lightning"]
+
+    @requires_ct
+    def test_rails_with_circuit_tracer_get_all_three(self):
+        names = self._register_with_supported(
+            (
+                ("module", "core", "interp_engine"),
+                ("module", "interp_engine", "lightning"),
+                ("module", "circuit_tracer", "core", "interp_engine"),
+            )
+        )
+        assert names == [
+            "circuit_tracer+core+interp_engine",
+            "core+interp_engine",
+            "interp_engine+lightning",
+        ]
+
+    def test_direct_import_without_circuit_tracer_registers_the_core_compositions(self, monkeypatch):
+        """The pip path in an environment that never installed the optional package.
+
+        THE case the maintainer's requirement is about: the core compositions must work with circuit-tracer absent.
+        """
+        import interp_engine_adapter.adapter as mod
+
+        monkeypatch.setattr(mod, "_CT_PAIRING", None)
+        monkeypatch.setattr(mod, "_circuit_tracer_pairing", lambda: None)
+        registry = _fresh_registry()
+        InterpEngineAdapter.register_adapter_ctx(registry)
+        assert _names(registry) == ["core+interp_engine", "interp_engine+lightning"]
+
+    def test_a_satisfiable_composition_that_cannot_build_raises_rather_than_registering_nothing(self, monkeypatch):
+        """Disagreement between the rails and this component is reported HERE, naming the cause.
+
+        Skipping would leave the rails' own invariant to report it as a registration mismatch, which points at the wrong
+        thing.
+        """
+        import interp_engine_adapter.adapter as mod
+        from interpretune.hub import adapters as hub_adapters
+
+        monkeypatch.setattr(mod, "_CT_PAIRING", None)
+        monkeypatch.setattr(mod, "_circuit_tracer_pairing", lambda: None)
+        token = hub_adapters._SUPPORTED_COMPOSITIONS.set((("module", "circuit_tracer", "core", "interp_engine"),))
+        try:
+            with pytest.raises(UnmappableHookError, match="reported satisfiable"):
+                InterpEngineAdapter.register_adapter_ctx(_fresh_registry())
+        finally:
+            hub_adapters._SUPPORTED_COMPOSITIONS.reset(token)
+
+
+class TestManifestDeclaresTheConditionality:
+    """The manifest must STATE that the third composition is conditional, not merely omit the condition.
+
+    An unconditional declaration advertises three compositions to every reader while an environment without circuit-
+    tracer yields two, with nothing saying so. That is the declarative twin of the silent registration loss the rails'
+    skip reporting exists to remove.
+    """
+
+    def _manifest(self):
+        from pathlib import Path
+
+        import yaml
+
+        import interp_engine_adapter.adapter as mod
+
+        return yaml.safe_load((Path(mod.__file__).parent / "it_component.yaml").read_text())
+
+    def test_the_circuit_tracer_composition_declares_requires(self):
+        entries = self._manifest()["adapters"]["compositions"]
+        ct = [e for e in entries if "circuit_tracer" in e["adapters"]]
+        assert len(ct) == 1, "expected exactly one circuit-tracer composition"
+        assert ct[0].get("requires", {}).get("pip") == ["circuit-tracer"]
+
+    def test_the_core_compositions_declare_no_requires(self):
+        """They must not, or an environment without circuit-tracer would get nothing at all."""
+        entries = self._manifest()["adapters"]["compositions"]
+        for entry in entries:
+            if "circuit_tracer" not in entry["adapters"]:
+                assert not entry.get("requires"), f"{entry['adapters']} should be unconditional"
+
+    def test_every_declared_composition_is_one_the_code_can_register(self):
+        """Manifest and code compared entry for entry, in the direction that catches drift: a manifest advertising
+        something the code cannot produce is a promise to a reader that nothing will keep."""
+        declared = {("module", *sorted(e["adapters"])) for e in self._manifest()["adapters"]["compositions"]}
+        known = {InterpEngineAdapter._composition_key(c) for c, _, _ in InterpEngineAdapter._COMPOSITIONS}
+        assert declared == known, f"manifest and code disagree: {declared ^ known}"
+
+
+@requires_ct
+class TestCircuitTracerPairing:
+    """The composed class, and the refusal that must survive composition."""
+
+    def test_the_mro_puts_circuit_tracer_ahead_of_this_adapters_base(self):
+        """Mirrors the bundled pairings: circuit-tracer's layers win over the partner backend's base,
+        and the pairing mixin wins over both."""
+        import interp_engine_adapter.adapter as mod
+
+        pairing = mod._circuit_tracer_pairing()
+        names = [c.__name__ for c in pairing.__mro__]
+        assert names[1] == "CircuitTracerInterpEngineModuleMixin"
+        assert names.index("BaseCircuitTracerModule") < names.index("BaseInterpEngineModule")
+        assert names.index("CircuitTracerAdapter") < names.index("BaseInterpEngineModule")
+
+    def test_the_pairing_is_cached_not_rebuilt(self):
+        import interp_engine_adapter.adapter as mod
+
+        assert mod._circuit_tracer_pairing() is mod._circuit_tracer_pairing()
+
+    def _guarded_model(self):
+        import interp_engine_adapter.adapter as mod
+
+        mixin = mod._circuit_tracer_pairing().__mro__[1]
+
+        class _FakeReplacementModel:
+            def _resolve_feature_hook(self, hook):
+                return f"resolved:{hook}"
+
+        class _Host:
+            _replacement_model = _FakeReplacementModel()
+            _guard_feature_hook_resolution = mixin._guard_feature_hook_resolution
+
+        host = _Host()
+        host._guard_feature_hook_resolution()
+        return host._replacement_model
+
+    @pytest.mark.parametrize("hook", ["hook_mlp_in", "hook_attn_in"])
+    def test_the_refusal_survives_composition(self, hook):
+        """THE point of the pairing.
+
+        circuit-tracer resolves transcoder hook names through interp-engine's mapper, which resolves these PRE-norm
+        names to the POST-norm sublayer inputs with no refusal. A three-way composition that silently regained that
+        would be worse than not shipping one, because the refusal in the other two is what tells a user this adapter is
+        careful about it.
+        """
+        with pytest.raises(UnmappableHookError, match="BEFORE the block norm"):
+            self._guarded_model()._resolve_feature_hook(hook)
+
+    @pytest.mark.parametrize("hook", ["hook_resid_post", "ln2.hook_normalized"])
+    def test_unambiguous_hooks_still_reach_circuit_tracer(self, hook):
+        """The guard is narrow on purpose.
+
+        `ln2.hook_normalized` in particular must pass through:
+        circuit-tracer handles it correctly via its own norm lookup, and refusing it here would break a
+        case that upstream already gets right.
+        """
+        assert self._guarded_model()._resolve_feature_hook(hook) == f"resolved:{hook}"
+
+    def test_guarding_twice_does_not_double_wrap(self):
+        model = self._guarded_model()
+        first = model._resolve_feature_hook
+        assert getattr(first, "_it_seam_guarded", False)
 
 
 class TestModelBackendIsAttachedNotOverridden:
