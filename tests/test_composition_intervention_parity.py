@@ -322,6 +322,13 @@ class TestInterventionParity:
         The discriminating power lives in the test DATA, so that is what gets asserted.
 
         Measured on gpt2: at n=5 the sets are {4} and {0..4}; at n=1 both are {0}.
+
+        COUNTS THE SHAPE, WHICH IS ONLY SAFE BECAUSE THIS FIXTURE IS UNPADDED. `prompt_ids` here is one
+        tokenized string with no attention mask, so shape equals real positions. A padded batch would
+        make this assertion too weak in exactly the way it exists to prevent: two columns of which one
+        is padding still leaves one real position. Interpretune's conformance suite counts REAL
+        positions per batch from the mask for that reason, and supersedes this when item 4 of
+        speediedan/it-interp-engine-adapter#14 adopts it.
         """
         assert prompt_ids.shape[1] >= 2, (
             f"prompt is {prompt_ids.shape[1]} token(s); the two position scopes are indistinguishable "
