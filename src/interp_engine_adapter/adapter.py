@@ -28,7 +28,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from interpretune.adapters.registration import CompositionRegistry
-from interpretune.analysis.backends.capabilities import BackendCapability, get_model_backend
+from interpretune.analysis.backends.capabilities import (
+    BackendCapability,
+    InterventionMode,
+    InterventionSupport,
+    PositionScope,
+    get_model_backend,
+)
+from interpretune.analysis.backends.interventions import normalize_position_scope
 from interpretune.analysis.ops.base import get_batch_input
 from interpretune.base import CoreHelperAttributes, BaseITModule
 from interpretune.protocol import Adapter
@@ -187,28 +194,47 @@ class _Seam:
         happen inside it. Keeping that shape here rather than in the backend is the point of the seam:
         if the engine changes how steering is entered, exactly one method moves.
 
+        ``specs`` is a list of ``(PositionScope, SteerSpec)`` pairs. The scope is not carried on the
+        engine's ``SteerSpec`` -- it has no position field -- so it is grouped here and expressed as the
+        engine's ``position_mask``.
+
         NOTE [the position mask is not an optimisation]: interp-engine steers EVERY prompt position by
-        default. Interpretune's intervention contract is the last token: its bundled backends route
-        through ``apply_intervention_to_last_token``, and an op written against them means that. Passing
-        the engine's default through would have applied the caller's vector at all five positions of a
-        five-token prompt while the caller asked for one, and the forward would have completed and
-        returned a plausible result.
+        default, while interpretune's default scope is ``LAST_TOKEN``. Passing the engine's default
+        through applies the caller's vector at all five positions of a five-token prompt when the caller
+        asked for one, and the forward completes and returns a plausible result. Nothing raises, the
+        shapes agree, and only the meaning differs, which is this adapter's own defect class reached
+        through a DEFAULT rather than through a hook name.
 
-        That is this adapter's own defect class reached through a DEFAULT rather than through a hook
-        name: nothing raises, the shapes agree, and only the meaning differs. So the mask is applied
-        here, where the two vocabularies meet, rather than left to a caller who has no reason to know
-        the engine disagrees.
+        ``position_mask`` EXCLUDES positions, so ``LAST_TOKEN`` is "exclude all but the last" and
+        ``ALL_POSITIONS`` is no mask at all. Measured on gpt2 layer 5: without a mask 5 of 5 positions
+        change; with one, exactly 1, and the logits match a hand-built HuggingFace reference to 0.0.
 
-        ``position_mask`` EXCLUDES positions, so excluding every position but the last is how the
-        engine spells "last token only". Measured on gpt2 layer 5: without the mask all 5 of 5
-        positions change; with it exactly 1 does, and the resulting logits match a hand-built
-        HuggingFace reference that adds the same vector at the same position to 0.0.
+        MIXED SCOPES ARE EXPRESSED, NOT REFUSED, and that was measured rather than assumed. The mask is
+        per CALL, so the obvious reading is that one payload cannot carry two scopes. But ``steer``
+        contexts NEST, and nesting gives a mask per group: a payload mixing scopes runs as one context
+        per group. Verified against two HuggingFace forward pre-hooks applying the same two vectors at
+        the same two scopes, agreeing to 0.0.
+
+        That nesting composes correctly here because every declared mode is ADDITIVE, and addition
+        commutes, so group order cannot matter. A future mode that overwrites rather than accumulates
+        (``replace`` is the obvious one) would make group order significant, and this would then need to
+        define the order or refuse the mixed payload. `_MODE_TO_STEER_METHOD` is the guard: it declares
+        exactly one mode, and `intervention_support` is asserted to agree with it.
         """
         from interp_engine import run_with_cache, steer
+        from contextlib import ExitStack
 
         n_positions = _prompt_length(tokens)
-        mask = list(range(n_positions - 1)) if n_positions and n_positions > 1 else None
-        with steer(engine_model, specs, prompt_token_ids=tokens, position_mask=mask):
+        last_only = list(range(n_positions - 1)) if n_positions and n_positions > 1 else None
+
+        grouped: dict[Any, list[Any]] = {}
+        for scope, spec in specs:
+            grouped.setdefault(scope, []).append(spec)
+
+        with ExitStack() as stack:
+            for scope, group in grouped.items():
+                mask = last_only if scope is PositionScope.LAST_TOKEN else None
+                stack.enter_context(steer(engine_model, group, prompt_token_ids=tokens, position_mask=mask))
             return _logits_of(run_with_cache(engine_model, tokens, []))
 
     @staticmethod
@@ -671,6 +697,25 @@ class InterpEngineModelBackend:
     def capabilities(self) -> frozenset[Any]:
         return frozenset({BackendCapability.INTERVENTION})
 
+    @property
+    def intervention_support(self) -> InterventionSupport:
+        """Which configurations of ``INTERVENTION`` this backend honours.
+
+        BOTH scopes, because the engine expresses them one argument apart: ``position_mask`` excludes
+        positions, so ``LAST_TOKEN`` is a mask and ``ALL_POSITIONS`` is its absence. Declaring only
+        ``LAST_TOKEN`` would have been the easy answer and the wrong one -- it would refuse an operation
+        this backend can perform exactly, which is the mirror image of silently narrowing one.
+
+        ONE mode, and the asymmetry is real rather than an omission. ``replace``, ``patch`` and
+        ``project`` all need the CURRENT activation, and the engine's additive steering primitive never
+        observes it. `_steer_method_for` refuses those three by name; this declaration is the same fact
+        stated ahead of the call, so the gate can refuse before reaching this backend at all.
+        """
+        return InterventionSupport(
+            position_scopes=frozenset({PositionScope.LAST_TOKEN, PositionScope.ALL_POSITIONS}),
+            modes=frozenset({InterventionMode(mode) for mode in _MODE_TO_STEER_METHOD}),
+        )
+
     def supports(self, capability: Any) -> bool:
         # Compare by VALUE: interpretune's own gate does, because a suite can load the capabilities
         # module twice and leave value-equal, identity-distinct members on either side.
@@ -726,13 +771,18 @@ class InterpEngineModelBackend:
                 "silently ignored here."
             )
         tokens = _tokens_from_batch(batch)
+        # Paired with its scope rather than flattened: the engine's `SteerSpec` has no position field,
+        # so the scope has to travel beside the spec to reach the mask that expresses it.
         specs = [
-            _Seam.steer_spec(
-                vector=_require_expressible_operand(spec.intervention_tensor, point),
-                layer=layer,
-                coeff=spec.scale_factor,
-                method=_steer_method_for(getattr(spec, "mode", "replace")),
-                point=point,
+            (
+                normalize_position_scope(getattr(spec, "position_scope", PositionScope.LAST_TOKEN)),
+                _Seam.steer_spec(
+                    vector=_require_expressible_operand(spec.intervention_tensor, point),
+                    layer=layer,
+                    coeff=spec.scale_factor,
+                    method=_steer_method_for(getattr(spec, "mode", "replace")),
+                    point=point,
+                ),
             )
             for layer, point, spec in _intervention_targets(interventions, model)
         ]

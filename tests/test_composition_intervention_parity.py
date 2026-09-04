@@ -63,6 +63,35 @@ torch = pytest.importorskip("torch", reason="torch is a declared dependency")
 pytest.importorskip("transformers", reason="transformers arrives with interpretune")
 
 
+def _hf_steered(hf_model, prompt_ids, edits):
+    """Logits from the HF model with `edits` applied by forward pre-hook: `(layer, vector, last_only)`.
+
+    The reference is built here rather than taken from a participant, so a participant agreeing with itself cannot count
+    as parity.
+    """
+    handles = []
+    for layer, vector, last_only in edits:
+
+        def make(vector=vector, last_only=last_only):
+            def hook(_module, args):
+                hidden = args[0].clone()
+                if last_only:
+                    hidden[:, -1, :] = hidden[:, -1, :] + vector
+                else:
+                    hidden = hidden + vector
+                return (hidden,) + args[1:]
+
+            return hook
+
+        handles.append(hf_model.transformer.h[layer].register_forward_pre_hook(make()))
+    try:
+        with torch.no_grad():
+            return hf_model(prompt_ids).logits
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
 @pytest.fixture(scope="module")
 def staged_module():
     """The entrypoint, executed from a staged component tree the way the hub loader executes it."""
@@ -239,10 +268,11 @@ class TestCaptureParity:
 class TestInterventionParity:
     """The measurement N5 exists for, through the registered composition's model backend."""
 
-    def _steered(self, hosted, prompt_ids, steer_vector):
+    def _steered(self, hosted, prompt_ids, steer_vector, scope=None):
         from interpretune.analysis.backends import InterventionSpec
 
-        spec = InterventionSpec(intervention_tensor=steer_vector, mode="add", scale_factor=1.0)
+        extra = {"position_scope": scope} if scope is not None else {}
+        spec = InterventionSpec(intervention_tensor=steer_vector, mode="add", scale_factor=1.0, **extra)
         # A BARE spec, not a list. `InterventionSpec` is a NamedTuple, so this is the shape that used to
         # be unpacked into its own fields; passing it deliberately keeps that regression covered.
         # No coercion here any more, and its absence is the assertion. This used to normalize with
@@ -257,22 +287,81 @@ class TestInterventionParity:
         _, post = self._steered(hosted, prompt_ids, steer_vector)
         torch.testing.assert_close(post, hf_steered_logits, rtol=RTOL, atol=ATOL)
 
-    def test_the_intervention_applies_at_the_last_position_only(self, hosted, prompt_ids, steer_vector):
-        """The divergence this module found, pinned so it cannot come back.
+    def test_the_scope_selects_the_position_set(self, hosted, prompt_ids, steer_vector):
+        """The position-SET discriminator, which replaced a count assertion.
 
-        interp-engine steers EVERY prompt position by default; interpretune's contract is the last token.
-        Nothing raises when they disagree: the shapes match, the forward completes, and only the meaning
-        differs. Asserting the position COUNT catches that where comparing logits alone would not, since
-        a whole-prompt intervention still produces plausible logits.
+        A count is a weaker instrument than it looks: "one position changed" is satisfied by the WRONG
+        one position. The set says which. That distinction is the whole point here, because both scopes
+        produce plausible logits and a value comparison alone cannot separate them.
+
+        Written to lift into interpretune's conformance suite (speediedan/interpretune#450) as the
+        position-scope case; the body is deliberately free of anything specific to this component beyond
+        the payload builder.
         """
-        pre, post = self._steered(hosted, prompt_ids, steer_vector)
-        changed = (post - pre).abs().max(dim=-1).values[0] > 1e-6
-        assert int(changed.sum()) == 1, (
-            f"{int(changed.sum())} of {changed.numel()} positions changed; interpretune's intervention "
-            "contract is the last token. Steering every position completes and returns a plausible "
-            "result, which is why this asserts the count rather than only the values."
-        )
-        assert bool(changed[-1]), "the changed position was not the last one"
+        from interpretune.analysis.backends import PositionScope
+
+        n = prompt_ids.shape[1]
+        for scope, expected in (
+            (PositionScope.LAST_TOKEN, {n - 1}),
+            (PositionScope.ALL_POSITIONS, set(range(n))),
+        ):
+            pre, post = self._steered(hosted, prompt_ids, steer_vector, scope=scope)
+            changed = {i for i, c in enumerate((post - pre).abs().max(dim=-1).values[0] > 1e-6) if bool(c)}
+            assert changed == expected, f"{scope.value}: changed {sorted(changed)}, expected {sorted(expected)}"
+
+    def test_the_whole_prompt_case_is_the_negative_control(self, hosted, prompt_ids, steer_vector):
+        """Without it, a backend that ignored scope entirely and always steered everything would pass the
+        ALL_POSITIONS case above.
+
+        The two scopes must produce DIFFERENT position sets, or the discriminator is measuring nothing.
+        """
+        from interpretune.analysis.backends import PositionScope
+
+        sets = []
+        for scope in (PositionScope.LAST_TOKEN, PositionScope.ALL_POSITIONS):
+            pre, post = self._steered(hosted, prompt_ids, steer_vector, scope=scope)
+            sets.append({i for i, c in enumerate((post - pre).abs().max(dim=-1).values[0] > 1e-6) if bool(c)})
+        assert sets[0] != sets[1], "both scopes produced the same position set; scope is being ignored"
+
+    def test_each_scope_matches_a_hand_built_reference(self, hosted, prompt_ids, steer_vector, hf_model):
+        """The set says WHICH positions; this says the values there are right.
+
+        A backend could edit the correct positions with the wrong arithmetic and satisfy the discriminator alone.
+        """
+        from interpretune.analysis.backends import PositionScope
+
+        for scope, last_only in ((PositionScope.LAST_TOKEN, True), (PositionScope.ALL_POSITIONS, False)):
+            reference = _hf_steered(hf_model, prompt_ids, [(LAYER, steer_vector, last_only)])
+            _, post = self._steered(hosted, prompt_ids, steer_vector, scope=scope)
+            torch.testing.assert_close(post, reference, rtol=RTOL, atol=ATOL)
+
+    def test_a_mixed_scope_payload_is_expressed_rather_than_refused(self, hosted, prompt_ids, hf_model):
+        """Measured, not assumed. `position_mask` is per CALL and `SteerSpec` carries no position, so the obvious
+        reading is that one payload cannot hold two scopes. `steer` contexts NEST, which gives a mask per group, so
+        the payload is grouped by scope instead of refused.
+
+        Refusing would have been the mirror image of the defect this component exists to prevent: declining
+        an operation the backend performs exactly, rather than substituting a wrong one, but still an
+        answer that misrepresents what it can do.
+
+        This composes because every declared mode is additive and addition commutes, so group order cannot
+        matter. `test_the_declared_modes_equal_the_mapped_modes` is what keeps that true.
+        """
+        from interpretune.analysis.backends import InterventionSpec, PositionScope
+
+        torch.manual_seed(1)
+        v_all, v_last = torch.randn(768), torch.randn(768)
+        payload = {
+            "blocks.3.hook_resid_pre": InterventionSpec(
+                intervention_tensor=v_all, mode="add", scale_factor=1.0, position_scope=PositionScope.ALL_POSITIONS
+            ),
+            "blocks.7.hook_resid_pre": InterventionSpec(
+                intervention_tensor=v_last, mode="add", scale_factor=1.0, position_scope=PositionScope.LAST_TOKEN
+            ),
+        }
+        _, post = hosted._model_backend.fwd_w_intervention(hosted.engine_model, {"input_ids": prompt_ids}, payload)
+        reference = _hf_steered(hf_model, prompt_ids, [(3, v_all, False), (7, v_last, True)])
+        torch.testing.assert_close(post, reference, rtol=RTOL, atol=ATOL)
 
     def test_the_baseline_is_an_unsteered_forward(self, hosted, prompt_ids, steer_vector, hf_model):
         """`fwd_w_intervention` returns (baseline, steered).
@@ -283,6 +372,31 @@ class TestInterventionParity:
         with torch.no_grad():
             unsteered = hf_model(prompt_ids).logits
         torch.testing.assert_close(pre, unsteered, rtol=RTOL, atol=ATOL)
+
+
+class TestTheDeclarationAgreesWithTheImplementation:
+    """`intervention_support` says what the backend claims; the refusal table says what it does.
+
+    Drift between them is undetectable from either side alone, and it is what the conformance suite exists to catch
+    across backends. This is the one-line version for this component.
+    """
+
+    def test_the_declared_modes_equal_the_mapped_modes(self, staged_module):
+        module, _ = staged_module
+        backend = module.InterpEngineModelBackend()
+        declared = {m.value for m in backend.intervention_support.modes}
+        mapped = set(module._MODE_TO_STEER_METHOD)
+        assert declared == mapped, (
+            f"declared modes {sorted(declared)} != mapped {sorted(mapped)}. A declaration wider than the "
+            "table promises a mode the seam refuses; narrower refuses one it can perform."
+        )
+
+    def test_both_scopes_are_declared_because_the_engine_expresses_both(self, staged_module):
+        from interpretune.analysis.backends import PositionScope
+
+        module, _ = staged_module
+        scopes = module.InterpEngineModelBackend().intervention_support.position_scopes
+        assert scopes == {PositionScope.LAST_TOKEN, PositionScope.ALL_POSITIONS}
 
 
 class TestTheProtocolsDeclaredShapesAreReturned:

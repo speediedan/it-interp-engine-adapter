@@ -403,8 +403,13 @@ class TestModelBackend:
 
         backend = InterpEngineModelBackend()
         assert backend.supports(BackendCapability.INTERVENTION)
-        for absent in (BackendCapability.LATENT_MODELS, BackendCapability.GRADIENTS, BackendCapability.BATCHED_HOOKS):
-            assert not backend.supports(absent)
+        # Enumerated from the ENUM rather than a hand-written list. The previous version named
+        # BATCHED_HOOKS explicitly and went stale the moment speediedan/interpretune#449 removed it,
+        # which is the failure mode of pinning a vocabulary by transcription: the test breaks on a
+        # change it was not written to have an opinion about. Deriving the complement means a member
+        # added upstream is asserted absent automatically, and a member removed simply disappears.
+        for absent in set(BackendCapability) - {BackendCapability.INTERVENTION}:
+            assert not backend.supports(absent), f"unexpectedly claims {absent}"
 
     def test_satisfies_core_and_intervention_protocols_only(self):
         from interpretune.analysis.backends.protocols import (
