@@ -208,8 +208,11 @@ def hosted(staged_module, composition_class, hf_model, prompt_ids):
 
 
 class TestReferenceIsLive:
-    """Positive control. Every comparison below asserts closeness to an HF reference, and a degenerate
-    reference would let all of them pass while measuring nothing."""
+    """Positive control.
+
+    Every comparison below asserts closeness to an HF reference, and a degenerate reference would let all of them pass
+    while measuring nothing.
+    """
 
     def test_reference_activation_is_non_degenerate(self, hf_resid_pre, prompt_ids):
         assert hf_resid_pre.shape[0] == prompt_ids.shape[1], "one position per input token"
@@ -242,11 +245,13 @@ class TestInterventionParity:
         spec = InterventionSpec(intervention_tensor=steer_vector, mode="add", scale_factor=1.0)
         # A BARE spec, not a list. `InterventionSpec` is a NamedTuple, so this is the shape that used to
         # be unpacked into its own fields; passing it deliberately keeps that regression covered.
-        pre, post = hosted._model_backend.fwd_w_intervention(
+        # No coercion here any more, and its absence is the assertion. This used to normalize with
+        # `o.logits if hasattr(o, "logits") else o`, which quietly accepted either an output object or a
+        # tensor -- and so hid that the seam was returning the object where interpretune's protocol
+        # declares `torch.Tensor`. The workaround was written before the mismatch was noticed.
+        return hosted._model_backend.fwd_w_intervention(
             hosted.engine_model, {"input_ids": prompt_ids}, {f"blocks.{LAYER}.hook_resid_pre": spec}
         )
-        as_logits = lambda o: o.logits if hasattr(o, "logits") else o  # noqa: E731
-        return as_logits(pre), as_logits(post)
 
     def test_steered_logits_match_the_hf_reference(self, hosted, prompt_ids, steer_vector, hf_steered_logits):
         _, post = self._steered(hosted, prompt_ids, steer_vector)
@@ -270,9 +275,57 @@ class TestInterventionParity:
         assert bool(changed[-1]), "the changed position was not the last one"
 
     def test_the_baseline_is_an_unsteered_forward(self, hosted, prompt_ids, steer_vector, hf_model):
-        """`fwd_w_intervention` returns (baseline, steered). A baseline that was itself steered would make
-        the pair agree for the wrong reason."""
+        """`fwd_w_intervention` returns (baseline, steered).
+
+        A baseline that was itself steered would make the pair agree for the wrong reason.
+        """
         pre, _ = self._steered(hosted, prompt_ids, steer_vector)
         with torch.no_grad():
             unsteered = hf_model(prompt_ids).logits
         torch.testing.assert_close(pre, unsteered, rtol=RTOL, atol=ATOL)
+
+
+class TestTheProtocolsDeclaredShapesAreReturned:
+    """`fwd`, `fwd_w_cache` and `fwd_w_intervention` return TENSORS, as the protocol declares.
+
+    `fwd_w_cache` used to read `getattr(cache, "logits", None)`. The engine's `Cache` exposes `get`,
+    `output` and `tensors`, with the logits at `cache.output.logits`, so that attribute never existed
+    and the default fired on every call: `answer_logits` downstream was silently `None`, forever, in
+    every version.
+
+    A `getattr` default is a worse failure than a wrong attribute name. A wrong name raises the first
+    time it runs; a default returns a plausible value indefinitely. So these assert the TYPE rather
+    than only that a call succeeds, because succeeding was never the problem.
+    """
+
+    def test_fwd_returns_a_tensor(self, hosted, prompt_ids):
+        out = hosted._model_backend.fwd(hosted.engine_model, {"input_ids": prompt_ids})
+        assert isinstance(out, torch.Tensor), f"protocol declares torch.Tensor, got {type(out).__name__}"
+
+    def test_fwd_w_cache_returns_a_tensor_and_not_none(self, hosted, prompt_ids):
+        logits, cache = hosted._model_backend.fwd_w_cache(
+            hosted.engine_model, {"input_ids": prompt_ids}, [f"blocks.{LAYER}.hook_resid_pre"]
+        )
+        assert logits is not None, "the regression: logits were None on every call"
+        assert isinstance(logits, torch.Tensor), f"protocol declares torch.Tensor, got {type(logits).__name__}"
+        assert cache is not None
+
+    def test_fwd_w_intervention_returns_tensors(self, hosted, prompt_ids, steer_vector):
+        from interpretune.analysis.backends import InterventionSpec
+
+        spec = InterventionSpec(intervention_tensor=steer_vector, mode="add", scale_factor=1.0)
+        pre, post = hosted._model_backend.fwd_w_intervention(
+            hosted.engine_model, {"input_ids": prompt_ids}, {f"blocks.{LAYER}.hook_resid_pre": spec}
+        )
+        for name, value in (("baseline", pre), ("steered", post)):
+            assert isinstance(value, torch.Tensor), f"{name} should be a tensor, got {type(value).__name__}"
+
+    def test_the_cache_logits_agree_with_a_plain_forward(self, hosted, prompt_ids, hf_model):
+        """Not merely a tensor: the RIGHT tensor. A shape-correct wrong tensor would pass the checks
+        above, which is the failure mode this component exists to be careful about."""
+        logits, _ = hosted._model_backend.fwd_w_cache(
+            hosted.engine_model, {"input_ids": prompt_ids}, [f"blocks.{LAYER}.hook_resid_pre"]
+        )
+        with torch.no_grad():
+            reference = hf_model(prompt_ids).logits
+        torch.testing.assert_close(logits, reference, rtol=RTOL, atol=ATOL)
