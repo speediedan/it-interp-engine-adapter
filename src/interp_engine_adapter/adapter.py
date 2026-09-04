@@ -209,7 +209,7 @@ class _Seam:
         n_positions = _prompt_length(tokens)
         mask = list(range(n_positions - 1)) if n_positions and n_positions > 1 else None
         with steer(engine_model, specs, prompt_token_ids=tokens, position_mask=mask):
-            return run_with_cache(engine_model, tokens, []).output
+            return _logits_of(run_with_cache(engine_model, tokens, []))
 
     @staticmethod
     def steer_spec(
@@ -236,7 +236,7 @@ class _Seam:
         """
         from interp_engine import run_with_cache
 
-        return run_with_cache(engine_model, tokens, []).output
+        return _logits_of(run_with_cache(engine_model, tokens, []))
 
     async def capture_async(engine_model: Any, tokens: Any, points: list[Any], detach: bool = True) -> Any:
         """The notebook path: one forward pass capturing the requested points, awaited.
@@ -412,6 +412,37 @@ def _require_expressible_operand(tensor: Any, hook_name: str) -> Any:
             "and note that this reproduces a span operation only for ORTHONORMAL rows."
         )
     return tensor
+
+
+def _logits_of(cache: Any) -> Any:
+    """The logits tensor from an engine ``Cache``, raising rather than defaulting when absent.
+
+    NOT ``getattr(cache, "logits", None)``. That spelling was here and it could never work: the engine's
+    ``Cache`` exposes ``get``, ``output`` and ``tensors``, and the logits live at ``cache.output.logits``.
+    Because the attribute simply does not exist, the default fired on EVERY call and `fwd_w_cache`
+    returned ``None`` for logits always, in every version, since it was written.
+
+    A `getattr` default is worse here than a wrong method name: a wrong name raises the first time it
+    runs, while a default returns a plausible ``None`` forever. Interpretune's protocol declares
+    ``tuple[torch.Tensor, Any]``, so downstream `answer_logits` was silently ``None`` rather than an
+    error anyone could act on.
+
+    Hence the raise. If a future engine returns an output without ``logits``, that should stop a caller
+    rather than hand them a shape the protocol says cannot happen.
+    """
+    output = getattr(cache, "output", None)
+    if output is None:
+        raise UnmappableHookError(
+            "the engine returned a cache with no `output`, so there are no logits to return; the "
+            "protocol declares a tensor here and this backend will not substitute None for one."
+        )
+    logits = getattr(output, "logits", None)
+    if logits is None:
+        raise UnmappableHookError(
+            f"the engine's output ({type(output).__name__}) exposes no `logits`, so this backend "
+            "cannot satisfy the protocol's declared return type. Refused rather than returned as None."
+        )
+    return logits
 
 
 def _prompt_length(tokens: Any) -> int:
@@ -662,7 +693,7 @@ class InterpEngineModelBackend:
         points = [_Seam.point_for(name, model) for name in hook_names]
         cache = _Seam.capture(model, _tokens_from_batch(batch), points)
         by_hook = {name: cache[point] for name, point in zip(hook_names, points)}
-        return getattr(cache, "logits", None), self.wrap_activation_cache(by_hook, model)
+        return _logits_of(cache), self.wrap_activation_cache(by_hook, model)
 
     def wrap_activation_cache(self, cache_dict: dict[str, Any], model: Any) -> Any:
         """Return the mapping as-is.
