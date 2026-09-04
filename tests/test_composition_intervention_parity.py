@@ -309,19 +309,24 @@ class TestInterventionParity:
             changed = {i for i, c in enumerate((post - pre).abs().max(dim=-1).values[0] > 1e-6) if bool(c)}
             assert changed == expected, f"{scope.value}: changed {sorted(changed)}, expected {sorted(expected)}"
 
-    def test_the_whole_prompt_case_is_the_negative_control(self, hosted, prompt_ids, steer_vector):
-        """Without it, a backend that ignored scope entirely and always steered everything would pass the
-        ALL_POSITIONS case above.
+    def test_the_prompt_can_discriminate_the_two_scopes(self, prompt_ids):
+        """A PRECONDITION on the fixture, not a comparison of results, and the difference matters.
 
-        The two scopes must produce DIFFERENT position sets, or the discriminator is measuring nothing.
+        The two exact-set cases above already catch a scope-ignoring backend: an always-last one fails
+        `all_positions`, an always-all one fails `last_token`. What they cannot catch is a prompt of ONE
+        token, where both scopes legitimately yield `{0}` and the sets become identical. A scope-ignoring
+        backend passes both cases there, and the suite reports green while measuring nothing.
+
+        Asserting "the two sets differ" would be the wrong guard for the same reason: on a one-token
+        prompt a CORRECT backend produces identical sets, so that assertion fails on correct behaviour.
+        The discriminating power lives in the test DATA, so that is what gets asserted.
+
+        Measured on gpt2: at n=5 the sets are {4} and {0..4}; at n=1 both are {0}.
         """
-        from interpretune.analysis.backends import PositionScope
-
-        sets = []
-        for scope in (PositionScope.LAST_TOKEN, PositionScope.ALL_POSITIONS):
-            pre, post = self._steered(hosted, prompt_ids, steer_vector, scope=scope)
-            sets.append({i for i, c in enumerate((post - pre).abs().max(dim=-1).values[0] > 1e-6) if bool(c)})
-        assert sets[0] != sets[1], "both scopes produced the same position set; scope is being ignored"
+        assert prompt_ids.shape[1] >= 2, (
+            f"prompt is {prompt_ids.shape[1]} token(s); the two position scopes are indistinguishable "
+            "below 2, so the exact-set cases would pass a backend that ignores scope entirely."
+        )
 
     def test_each_scope_matches_a_hand_built_reference(self, hosted, prompt_ids, steer_vector, hf_model):
         """The set says WHICH positions; this says the values there are right.
