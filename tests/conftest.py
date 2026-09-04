@@ -21,6 +21,13 @@ guard is redundant: that one catches a narrowed SELECTION, this one prevents it.
 
 from __future__ import annotations
 
+#: Interpretune's conformance suite ships as a pytest plugin, and a repository opts in by naming it.
+#: The suite owns case selection: it reads what the composed module's backends DECLARE at runtime and
+#: runs the cases for each declared surface, with a refusal case for each undeclared one, so declaring
+#: less is never a way to pass more. See `tests/test_conformance.py` for this repository's half.
+pytest_plugins = ["interpretune.testing.conformance.plugin"]
+
+
 import os
 
 import pytest

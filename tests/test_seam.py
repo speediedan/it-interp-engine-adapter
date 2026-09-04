@@ -91,10 +91,18 @@ requires_ct = pytest.mark.skipif(not _HAS_CT, reason="circuit-tracer not install
 
 
 def _names(registry):
-    """Composition keys as readable `a+b` strings, order-insensitive like the registry itself."""
+    """The distinct compositions registered, as readable `a+b` strings.
+
+    DEDUPLICATED, because a composition now occupies more than one component slot: the same adapter set
+    appears under both `module` and `datamodule`, and this helper answers "which compositions exist"
+    rather than "how many slots were registered". `test_every_composition_registers_both_component_slots`
+    is what asserts the slot pairing.
+    """
     return sorted(
-        "+".join(sorted(a.name if hasattr(a, "name") else str(a) for a in key[1:]))
-        for key in registry.available_compositions()
+        {
+            "+".join(sorted(a.name if hasattr(a, "name") else str(a) for a in key[1:]))
+            for key in registry.available_compositions()
+        }
     )
 
 
@@ -113,9 +121,34 @@ class TestRegistration:
         names = _names(registry)
         assert "core+interp_engine" in names
         assert "interp_engine+lightning" in names
+
+        # KEYED BY COMPONENT, because a composition is more than its module. This used to assert that
+        # every registered key mapped to `(InterpEngineModule,)`, which was true only while this component
+        # registered the module slot alone -- and registering only that half is exactly why it could not
+        # build an `ITSession`. The datamodule slot now exists, so the assertion has to say which slot it
+        # is talking about.
         for key in registry.available_compositions():
-            if "circuit_tracer" not in str(key):
+            if "circuit_tracer" in str(key):
+                continue
+            if key[0] == "module":
                 assert registry.get(key) == (InterpEngineModule,)
+            elif key[0] == "datamodule":
+                assert registry.get(key), f"{key} registered no datamodule classes"
+
+    def test_every_composition_registers_both_component_slots(self):
+        """A component that registers only the module half registers SUCCESSFULLY and fails later, at session
+        construction, with a KeyError naming the datamodule key.
+
+        That reads as a missing adapter rather than as a half-registered component, so the pairing is asserted here.
+        """
+        registry = _fresh_registry()
+        InterpEngineAdapter.register_adapter_ctx(registry)
+
+        by_adapters: dict[tuple, set[str]] = {}
+        for key in registry.available_compositions():
+            by_adapters.setdefault(key[1:], set()).add(key[0])
+        for adapters, slots in by_adapters.items():
+            assert {"module", "datamodule"} <= slots, f"{adapters} registers only {sorted(slots)}"
 
 
 class TestCompositionKeysMatchTheRails:

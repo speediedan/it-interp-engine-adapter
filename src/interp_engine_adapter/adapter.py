@@ -37,6 +37,7 @@ from interpretune.analysis.backends.capabilities import (
 )
 from interpretune.analysis.backends.interventions import normalize_position_scope
 from interpretune.analysis.ops.base import get_batch_input
+from interpretune.adapters.core import CoreAdapter
 from interpretune.base import CoreHelperAttributes, BaseITModule
 from interpretune.protocol import Adapter
 
@@ -471,6 +472,36 @@ def _logits_of(cache: Any) -> Any:
     return logits
 
 
+def _require_single_prompt(tokens: Any) -> None:
+    """Refuse a multi-row batch, naming THIS component's limitation rather than relaying the engine's.
+
+    interp-engine's protocol arm refuses a batch and tells the caller to loop over rows. This adapter
+    does not loop, and that is a decision rather than an omission.
+
+    WHY NOT LOOP: interpretune's batches are left-padded, and a padded row keeps its padded positions in
+    the batched forward. Per-row UNPADDED forwards are therefore a different computation from the batched
+    one -- legitimately different, not approximately so -- and the gap would surface as a numeric
+    divergence against a batched reference that looks exactly like a defect. A loop is only a transparent
+    implementation of the batched contract if it re-pads, so looping with re-padding stays a later
+    feature rather than a shortcut taken now.
+
+    The message is this adapter's own, for the same reason the mode and hook refusals are: a caller who
+    reaches here needs to know what THIS component does, and the engine's text advises looping, which is
+    advice this seam has deliberately declined.
+    """
+    shape = getattr(tokens, "shape", None)
+    if shape is None or len(shape) < 2 or int(shape[0]) <= 1:
+        return
+    raise UnmappableHookError(
+        f"this backend takes one prompt at a time and received a batch of {int(shape[0])}. The engine's "
+        "eager tier is single-prompt, and this adapter deliberately does not loop over rows: "
+        "interpretune's batches are left-padded, so per-row unpadded forwards would compute something "
+        "different from the batched forward while looking like an approximation of it. Use an eval batch "
+        "size of 1 for this composition (a conformance target declares `batch_size=1`), or a backend "
+        "that batches."
+    )
+
+
 def _prompt_length(tokens: Any) -> int:
     """Number of prompt positions in ``tokens``, or 0 when it cannot be told.
 
@@ -557,14 +588,42 @@ class InterpEngineCaptureMixin(InterpEngineAttributeMixin):
         #
         # There is no model-backend REGISTRY to register into (backends are adapter-attached by
         # construction), so a hub adapter reaches this seam exactly as a bundled one does.
-        if get_model_backend(self) is None:
-            self._model_backend = InterpEngineModelBackend()
         self._engine_model = _Seam.wrap_model(
             self.model,  # type: ignore[attr-defined]
             getattr(self, "tokenizer", None),
             self.interp_engine_cfg,
             model_id,
         )
+        # INTERPRETUNE'S HELPERS READ `module.model.tokenizer`, and this adapter is the first
+        # composition where `module.model` is the raw HuggingFace model rather than a wrapper.
+        # `get_module_dims` does `module.model.tokenizer.vocab_size`, which every other adapter satisfies
+        # because its wrapper carries one: TransformerLens' `HookedTransformer` and nnsight's
+        # `LanguageModel` both do.
+        #
+        # The engine model CANNOT take that slot. `EagerModel` is not an `nn.Module` -- its MRO is
+        # `[EagerModel, object]` -- so assigning it raises `cannot assign as child module`, unlike
+        # circuit-tracer's replacement models which are typed `nn.Module` precisely so they can. So the
+        # convention is met where it can be met: the model the module already owns carries the tokenizer
+        # it was loaded with.
+        #
+        # SOURCED FROM THE ENGINE MODEL, not from `self.tokenizer`, and that is measured rather than
+        # preferred. In a real `ITSession` the module carries NO tokenizer at this point: it lives on the
+        # datamodule, and `self.tokenizer` is None when this hook runs. `EagerModel` resolves its own from
+        # the model id, so after the wrap there is exactly one tokenizer in scope that is guaranteed to
+        # exist and to be the one the engine will actually use.
+        #
+        # Attaching rather than replacing, and only when absent, so a composition whose model already
+        # satisfies the convention is left alone.
+        # ATTACHED AFTER THE WRAP, and the order is load-bearing now rather than incidental: the backend
+        # is constructed WITH the engine model, so it cannot be built before one exists. Constructing it
+        # first bound `engine_model=None` and every backend call fell through to the argument it was
+        # handed, which is the raw HuggingFace model -- reintroducing the exact defect this change fixes.
+        if get_model_backend(self) is None:
+            self._model_backend = InterpEngineModelBackend(engine_model=self._engine_model)
+
+        tokenizer = getattr(self._engine_model, "tokenizer", None)
+        if tokenizer is not None and getattr(self.model, "tokenizer", None) is None:  # type: ignore[attr-defined]
+            self.model.tokenizer = tokenizer  # type: ignore[attr-defined]
         return result
 
     def engine_capture(self, tokens: Any, hook_names: list[str], detach: bool = True) -> Any:
@@ -577,8 +636,42 @@ class BaseInterpEngineModule(BaseITModule):
     """Base module for interp-engine compositions."""
 
 
-class InterpEngineModule(InterpEngineCaptureMixin, CoreHelperAttributes, BaseInterpEngineModule):
-    """The ``(core, interp_engine)`` module composition."""
+class InterpEngineModule(InterpEngineCaptureMixin, CoreAdapter, CoreHelperAttributes, BaseInterpEngineModule):
+    """The ``(core, interp_engine)`` module composition.
+
+    `CoreAdapter` IS PART OF A CORE COMPOSITION, and leaving it out is why this module could not complete
+    a runner step. It contributes `batch_to_device`, which the analysis runner calls on every batch, and
+    without it the composed module raised `AttributeError` from inside dataset generation -- surfacing as
+    a `DatasetGenerationError` that named neither the method nor this component.
+
+    TransformerLens does not inherit it because `TransformerLensAdapter` defines its own
+    `batch_to_device` for a converted model. interp-engine runs the HuggingFace model in place, so core's
+    implementation is the correct one rather than merely the available one, which is the same reason the
+    datamodule slot is plain `ITDataModule`.
+    """
+
+
+def _datamodule_classes(combination: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The datamodule composition for one adapter combination.
+
+    Lightning contributes its own datamodule base and the others do not, matching how the bundled
+    adapters register: `(ITDataModule,)` for a core composition, `(ITDataModule, LightningDataModule)`
+    for a Lightning one.
+
+    The Lightning import is LOCAL and deliberate. This entrypoint must import in an environment that
+    never installed Lightning -- the core compositions are the ones that have to work there -- so
+    reaching for it at module scope would make an optional dependency mandatory for compositions that
+    do not use it. Same reasoning as `_circuit_tracer_pairing`, and the same failure if ignored: an
+    import error at hub load rather than at registration.
+    """
+    from interpretune.base import ITDataModule
+
+    if Adapter.lightning not in combination:
+        return (ITDataModule,)
+
+    from interpretune.adapters.lightning import LightningDataModule
+
+    return (ITDataModule, LightningDataModule)
 
 
 #: Cache for the composed circuit-tracer pairing class. Built once, lazily, because constructing it
@@ -675,6 +768,22 @@ def _circuit_tracer_pairing() -> Any:
 class InterpEngineModelBackend:
     """The engine as an interpretune ``ModelBackend``: required core plus ``INTERVENTION``.
 
+    CARRIES ITS ENGINE MODEL, because the one it is HANDED is the wrong object. Interpretune's ops call
+    ``backend.fwd(model=module.model, batch=batch)``, and every bundled adapter satisfies that because
+    `module.model` IS its wrapper -- a `HookedTransformer`, an nnsight `LanguageModel`, a circuit-tracer
+    `ReplacementModel`. This component cannot use that convention: `EagerModel` is not an `nn.Module`, so
+    assigning it to `module.model` raises `cannot assign as child module`.
+
+    Handed the raw HuggingFace model instead, interp-engine falls back to its PROTOCOL arm and refuses
+    with "takes one prompt at a time on the GPT2LMHeadModel backend" -- a message about batching that is
+    really a message about being given the wrong model. That symptom cost an hour of chasing a batching
+    limitation this component does not have.
+
+    So the backend is constructed with the engine model in `post_auto_model_init` and uses it. The `model`
+    argument is not ignored so much as SATISFIED: `wrap_model` wraps in place, so the engine model and the
+    passed HF model are the same weights, and acting on the former is acting on the latter. This mirrors
+    circuit-tracer's `CT_MODEL_BACKEND_FACTORIES`, which are handed the module for the same reason.
+
     Interpretune's ``ModelBackend`` was decomposed into a required core and capability-gated method
     groups precisely so a component like this one can implement what it actually does and SAY so
     (interpretune R1, speediedan/interpretune#401). This implements:
@@ -692,6 +801,17 @@ class InterpEngineModelBackend:
     imported at module level, since those are the framework this component extends rather than the
     dependency it insulates against.
     """
+
+    def __init__(self, engine_model: Any = None) -> None:
+        self._engine_model = engine_model
+
+    def _engine(self, model: Any) -> Any:
+        """The engine model to act on: the one this backend was built with, else the argument.
+
+        Falling back rather than requiring it keeps direct construction working for the tests that build a
+        backend without a module, and honours a caller who DOES pass an engine model.
+        """
+        return self._engine_model if self._engine_model is not None else model
 
     @property
     def capabilities(self) -> frozenset[Any]:
@@ -725,7 +845,9 @@ class InterpEngineModelBackend:
     # -- ModelBackendCore ---------------------------------------------------------------------
 
     def fwd(self, model: Any, batch: dict[str, Any]) -> Any:
-        return _Seam.forward(model, _tokens_from_batch(batch))
+        tokens = _tokens_from_batch(batch)
+        _require_single_prompt(tokens)
+        return _Seam.forward(self._engine(model), tokens)
 
     def fwd_w_cache(self, model: Any, batch: dict[str, Any], names_filter: Any) -> tuple[Any, Any]:
         """Forward with activation caching, at TransformerLens hook names.
@@ -735,8 +857,11 @@ class InterpEngineModelBackend:
         adapter exists to get right.
         """
         hook_names = _names_filter_to_list(names_filter)
-        points = [_Seam.point_for(name, model) for name in hook_names]
-        cache = _Seam.capture(model, _tokens_from_batch(batch), points)
+        engine = self._engine(model)
+        tokens = _tokens_from_batch(batch)
+        _require_single_prompt(tokens)
+        points = [_Seam.point_for(name, engine) for name in hook_names]
+        cache = _Seam.capture(engine, tokens, points)
         by_hook = {name: cache[point] for name, point in zip(hook_names, points)}
         return _logits_of(cache), self.wrap_activation_cache(by_hook, model)
 
@@ -771,6 +896,7 @@ class InterpEngineModelBackend:
                 "silently ignored here."
             )
         tokens = _tokens_from_batch(batch)
+        _require_single_prompt(tokens)
         # Paired with its scope rather than flattened: the engine's `SteerSpec` has no position field,
         # so the scope has to travel beside the spec to reach the mask that expresses it.
         specs = [
@@ -784,10 +910,11 @@ class InterpEngineModelBackend:
                     point=point,
                 ),
             )
-            for layer, point, spec in _intervention_targets(interventions, model)
+            for layer, point, spec in _intervention_targets(interventions, self._engine(model))
         ]
-        pre = _Seam.forward(model, tokens)
-        post = _Seam.steer(model, tokens, specs)
+        engine = self._engine(model)
+        pre = _Seam.forward(engine, tokens)
+        post = _Seam.steer(engine, tokens, specs)
         return pre, post
 
 
@@ -871,5 +998,28 @@ class InterpEngineAdapter:
                 component_key="module",
                 adapter_combination=combination,  # type: ignore[arg-type]
                 composition_classes=classes,
+                description=description,
+            )
+            # THE DATAMODULE SLOT, and its absence is why this component could not form a session.
+            #
+            # `ITSession` resolves a composition per COMPONENT KEY: it looks up `("datamodule", *adapters)`
+            # as well as `("module", *adapters)`. Registering only the module slot registers successfully,
+            # passes every test that builds a module directly, and fails at session construction with a
+            # KeyError naming the datamodule key -- which reads as a missing adapter rather than as a
+            # component that registered half of itself.
+            #
+            # Nothing in this adapter has been exercised through a real `ITSession` until now; the seam
+            # tests and the parity module both host the module class by hand, which is precisely the shape
+            # of test that cannot see this. Interpretune's conformance suite builds the session, so it
+            # found it on first contact.
+            #
+            # `ITDataModule` unchanged, because interp-engine changes how a forward is OBSERVED and not how
+            # data is prepared. That is the same answer the TransformerLens and circuit-tracer adapters
+            # give for the same reason, rather than a default taken for convenience.
+            adapter_ctx_registry.register(
+                ADAPTER_NAME,
+                component_key="datamodule",
+                adapter_combination=combination,  # type: ignore[arg-type]
+                composition_classes=_datamodule_classes(combination),
                 description=description,
             )
