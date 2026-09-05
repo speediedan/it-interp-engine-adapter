@@ -40,7 +40,7 @@ jobs:
           # If a future interpretune reintroduces an undeclared import, this job fails at import rather
           # than being masked by a pin here, which is the outcome worth having.
           uv pip install --system --torch-backend=cpu -e ".[test]" \
-            "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
+            "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main"
       - name: Test
         run: pytest -v
 
@@ -73,6 +73,10 @@ jobs:
           uv venv /tmp/cold
           # `--torch-backend=cpu` for runner weight only; it changes which torch wheel resolves, not
           # which of THIS component's dependencies do.
+          # NO `[conformance]` HERE, and the asymmetry with the other jobs is deliberate. That extra
+          # is interpretune's TEST tooling; this job installs only what this COMPONENT declares, and
+          # pulling test tooling in would weaken the one property it checks. It runs the bootstrap
+          # script below, not the suite.
           VIRTUAL_ENV=/tmp/cold uv pip install --torch-backend=cpu . \
             "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
           echo "=== what landed (a short list is the point) ==="
@@ -150,7 +154,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip uv
           uv pip install --system -e ".[test]" \
-            "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
+            "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main"
       - name: Test (GPU)
         run: |
           nvidia-smi
