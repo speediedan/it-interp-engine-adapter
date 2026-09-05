@@ -82,6 +82,38 @@ naming what to ask for instead. A future session will read that refusal as an un
 tempted to resolve it to the tensor the caller probably meant. That substitution is the defect class
 this adapter exists to not propagate. Extend the refusal's message; do not remove the refusal.
 
+**There is exactly one legitimate way past that rule, and it is narrow.** `_Seam` also carries
+`_MEASURED_ALIASES` and `_MEASURED_GLOBAL_ALIASES`, which map a name the engine has no spelling for onto
+the point that holds the tensor. They look like the thing the paragraph above forbids and are its
+opposite, and the difference is not a matter of judgement:
+
+- `_REFUSED` names tensors that **differ**. Substituting one is answering a question nobody asked.
+- The alias tables name tensors **measured identical**, at `max|d| = 0.0`, against the semantics of the
+  name being aliased rather than against a nearby tensor that seemed close. `blocks.N.hook_in` is what a
+  bridge resolves to a forward pre-hook on block N; captured that way it equals `resid_pre.N` at 0.0 and
+  `blocks.N-1.hook_out` at 0.0 with cos 1.000000. `unembed.hook_in` equals `final_norm` at 0.0.
+
+An addition to those tables owes three things, and a session that cannot produce all three should refuse
+instead: **a measurement against the aliased name's own semantics**, not an argument that the two
+obviously mean the same thing; **a guard on the architecture the measurement does not cover** (the block
+input alias refuses on hyper-connection models, because `resid_pre` is only a block's input where there
+is one residual stream to be pre of); and **an upstream report**, because an alias table in a consumer is
+how a consumer eventually maps something it should have refused. Both current entries are reported
+against `decoderesearch/interp-engine`; delete them when it grows the spellings.
+
+`TestMeasuredAliasesAreNotTheRefusals` asserts the two tables stay disjoint and that the pre-norm
+refusal is still a refusal, so an alias table growing into the refusals fails a test rather than shipping.
+
+**The hook inventory is interpretune's vocabulary, not the engine's.** A callable `names_filter` is a
+predicate over the names interpretune uses, so `_hook_vocabulary` enumerates
+`HookNameResolver(architecture).supported_hooks`. Building it forward from the engine instead --
+`EagerModel.points()` spelled through `point_to_tlens_hook` -- yields 252 names on gpt2 and looks
+complete. It is not: the engine's reverse table holds one canonical spelling per point while its forward
+table accepts aliases, so `blocks.5.hook_resid_post` is in that inventory and `blocks.5.hook_out` is not,
+though both name the same tensor and interpretune uses the second. A predicate over the forward-built
+inventory matched **none** of the conformance suite's five capture points, and nothing in the failure
+pointed at spelling.
+
 ## Correctness lives here, not upstream
 
 Interpretune's core suite owns the **rails** (that the `adapters` kind loads, gates and registers,

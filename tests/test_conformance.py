@@ -121,12 +121,16 @@ class TestInterpEngineConformance(ModelBackendConformance):
         session_cfg_factory=build_session_cfg,
         forward_family="hf_native",
         load=load_component,
-        # ONE ROW PER BATCH, declared rather than worked around. interp-engine's eager tier is
-        # single-prompt, and this adapter refuses a multi-row batch instead of looping, because
-        # interpretune's batches are left-padded and per-row unpadded forwards would compute something
-        # different from the batched forward while looking like an approximation of it. Declaring the
-        # limit runs every case unpadded AND turns the refusal itself into a case, which is the same
-        # move the position-scope work made: a limitation the vocabulary could not express looked like a
-        # defect until it could.
-        batch_size=1,
+        # `batch_size` is left at the suite's default, and NOT declaring it is the point.
+        #
+        # This target briefly declared `batch_size=1`, on the strength of an engine message reading
+        # "takes one prompt at a time". That message names the MODEL it was given, and it was being
+        # given the raw HuggingFace model rather than the engine one; with the engine model it batches.
+        # Declaring the limit would have made the suite run every case unpadded, which is the weaker
+        # validation, and would have frozen a workaround as a property of the backend.
+        #
+        # Running padded is what found the defect worth having found: the seam was not passing
+        # `attention_mask` to the engine, so a padded row attended to its own pad positions and its
+        # last-position logits were wrong by 54.9 while nothing raised. A single-row target cannot see
+        # that, because an unpadded batch has no mask to drop.
     )

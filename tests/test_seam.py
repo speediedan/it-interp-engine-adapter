@@ -470,12 +470,119 @@ class TestModelBackend:
         with pytest.raises(UnmappableHookError, match="does not support latent-model handles"):
             backend.fwd_w_intervention(None, {"input_ids": None}, {}, latent_model_handles=[object()])
 
-    def test_a_callable_names_filter_is_refused_rather_than_under_capturing(self):
+    def test_a_callable_names_filter_needs_a_model_it_can_enumerate(self):
+        """A callable is applied to an inventory, so a backend with no resolvable model has none.
+
+        This replaced a blanket refusal of callables. The refusal was written when the inventory could not be built at
+        all; it can be, from interpretune's own vocabulary, and refusing callables refused ORDINARY use rather than an
+        exotic one, because interpretune's core turns an explicit list into a predicate before it reaches a backend.
+        """
         from interp_engine_adapter.adapter import InterpEngineModelBackend, UnmappableHookError
 
         backend = InterpEngineModelBackend()
-        with pytest.raises(UnmappableHookError, match="callable names_filters"):
+        with pytest.raises(UnmappableHookError, match="no hook mapping"):
             backend.fwd_w_cache(None, {"input_ids": None}, lambda name: True)
+
+
+class _FakeEngineModel:
+    """The minimum an `EagerModel` has to look like for hook translation, and no more.
+
+    Deliberately a stub rather than a loaded gpt2. Everything under test here is NAME translation -- an
+    inventory, a predicate over it, and two alias tables -- which touches no weights, so loading a model
+    would buy a slower test and the same assertions. What it must carry is exactly what the translation
+    path reads: an `hf_model` whose CLASS NAME selects interpretune's architecture mapping, a config
+    depth to expand layers over, and a residual stream count, which is what
+    `interp_engine.mappers.has_hyper_connections` gates the block-input alias on. That function RAISES
+    rather than defaulting when it finds no count, so omitting `n_residual_streams` here would fail in a
+    way that reads like a mapper bug.
+    """
+
+    class _Config:
+        n_layer = 12
+
+    class GPT2LMHeadModel:  # -- the class NAME is the architecture key, not a style choice
+        config = None
+
+    n_residual_streams = 1
+
+    def __init__(self):
+        self.hf_model = self.GPT2LMHeadModel()
+        self.hf_model.config = self._Config()
+
+
+class TestTheHookInventoryIsInterpretunesVocabulary:
+    """A callable filter is a predicate over interpretune's names, so it must meet interpretune's names.
+
+    The measurement behind this class: enumerating FORWARD from the engine instead -- its points spelled
+    through `point_to_tlens_hook` -- produces 252 names on gpt2 and looks complete, but the engine's
+    reverse table holds one CANONICAL spelling per point while its forward table accepts aliases. So
+    `blocks.5.hook_resid_post` is in that inventory and `blocks.5.hook_out` is not, though both name the
+    same tensor and interpretune uses the second. A predicate over it matched NONE of the conformance
+    suite's five capture points, and nothing in the failure pointed at spelling.
+    """
+
+    def test_the_vocabulary_contains_the_alias_spellings_interpretune_uses(self):
+        from interp_engine_adapter.adapter import _hook_vocabulary
+
+        vocabulary = set(_hook_vocabulary(_FakeEngineModel()))
+        # Both spellings of the same tensor, which is the property a canonical-only inventory lacks.
+        assert "blocks.5.hook_out" in vocabulary
+        assert "blocks.5.hook_resid_post" in vocabulary
+        assert "unembed.hook_in" in vocabulary
+
+    def test_a_filter_matching_nothing_is_refused_rather_than_returning_an_empty_cache(self):
+        from interp_engine_adapter.adapter import UnmappableHookError, _names_filter_to_list
+
+        with pytest.raises(UnmappableHookError, match="matched none of"):
+            _names_filter_to_list(lambda name: name == "blocks.5.hook_nonexistent", _FakeEngineModel())
+
+    def test_a_filter_selecting_an_unmappable_name_is_refused_rather_than_captured_partially(self):
+        """Partial capture is the failure this whole path exists to avoid.
+
+        A cache holding the mappable subset is indistinguishable from a complete one at the call site, so the caller
+        computes over a filter that silently meant less than it said.
+        """
+        from interp_engine_adapter.adapter import UnmappableHookError, _names_filter_to_list
+
+        with pytest.raises(UnmappableHookError, match="cannot capture at"):
+            _names_filter_to_list(
+                lambda name: name.endswith("hook_mlp_out") or name.endswith("hook_attn_in"), _FakeEngineModel()
+            )
+
+
+class TestMeasuredAliasesAreNotTheRefusals:
+    """The two tables in `_Seam` look alike and mean opposite things.
+
+    `_REFUSED` names tensors that DIFFER and must not be substituted. `_MEASURED_ALIASES` names tensors
+    measured IDENTICAL that the engine simply has no spelling for. Conflating them in either direction
+    is a defect: mapping a refusal answers a question nobody asked, and refusing an alias makes the
+    backend unusable for names interpretune treats as fundamental.
+    """
+
+    def test_the_two_tables_do_not_overlap(self):
+        from interp_engine_adapter.adapter import _Seam
+
+        assert not set(_Seam._REFUSED) & set(_Seam._MEASURED_ALIASES)
+        assert not set(_Seam._REFUSED) & set(_Seam._MEASURED_GLOBAL_ALIASES)
+
+    def test_block_input_resolves_to_the_residual_stream_before_the_block(self):
+        from interp_engine_adapter.adapter import _Seam
+
+        address = _Seam.point_for("blocks.5.hook_in", _FakeEngineModel())
+        assert address.name == "resid_pre"
+        assert address.layer == 5
+
+    def test_unembed_input_resolves_to_the_final_norm(self):
+        from interp_engine_adapter.adapter import _Seam
+
+        assert _Seam.point_for("unembed.hook_in", _FakeEngineModel()).name == "final_norm"
+
+    def test_the_prenorm_refusal_is_still_a_refusal(self):
+        """The regression this repo exists to prevent: an alias table growing into the refusals."""
+        from interp_engine_adapter.adapter import UnmappableHookError, _Seam
+
+        with pytest.raises(UnmappableHookError, match="BEFORE the block norm"):
+            _Seam.point_for("blocks.5.hook_mlp_in", _FakeEngineModel())
 
 
 class TestInterventionTargetsAreModelAware:
