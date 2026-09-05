@@ -29,6 +29,19 @@ dependencies = ["interp-engine~=1.5.1"]
 test = [
     "pytest",
     "interp-engine @ git+https://github.com/speediedan/interp-engine.git@fix/prenorm-block-hooks-are-refused",
+    # WHAT INTERPRETUNE'S CONFORMANCE SUITE NEEDS AND DOES NOT DECLARE. The suite ships inside
+    # interpretune, so an adopter reasonably expects installing interpretune to be enough. It is not:
+    # the suite's session builds a datamodule that reaches `evaluate`, and the metric script `evaluate`
+    # downloads imports `sklearn.metrics` at module level, where no static check of either tree can see
+    # it. Both live in interpretune's `examples` extra, which is scoped to running the shipped notebooks,
+    # so nothing an adopter would think to install pulls them.
+    #
+    # Measured, not guessed: without these the whole conformance file ERRORS at setup with
+    # `No module named 'evaluate'`, 16 errors and the plugin's own vacuity guard firing. That guard is
+    # what turns it into a red rather than a quiet skip, which is the behaviour worth having -- but the
+    # dependency still has to be declared somewhere, and until the suite declares it, here is somewhere.
+    "evaluate",
+    "scikit-learn",
 ]
 
 # A PACKAGE rather than a flat module, and the manifest ships as package data inside it. That is what
