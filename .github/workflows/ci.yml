@@ -106,13 +106,26 @@ jobs:
           register_dynamic_adapter(ADAPTER_NAME, source="speediedan/it-interp-engine-adapter")
           registry = CompositionRegistry()
           InterpEngineAdapter.register_adapter_ctx(registry)
+          # KEYED BY SLOT, because a composition is a (component, *adapters) pair and this component
+          # registers two slots per adapter set. Comparing adapter sets alone -- which this did until the
+          # datamodule slot landed -- yields each set TWICE and fails, and the shape of that failure (a
+          # list with duplicates against one without) points at the assertion rather than at what it
+          # checks. Naming the slot makes the coldest environment assert the stronger property: a session
+          # needs BOTH halves, and registering only the module is what left this component unable to
+          # form one.
           got = sorted(
-              "+".join(sorted(getattr(a, "value", str(a)) for a in key[1:]))
+              (str(key[0]), "+".join(sorted(getattr(a, "value", str(a)) for a in key[1:])))
               for key in registry.available_compositions()
           )
           print("registered:", got)
-          assert got == ["core+interp_engine", "interp_engine+lightning"], (
-              f"cold venv should register exactly the two circuit-tracer-free compositions, got {got}"
+          expected = sorted(
+              (slot, adapters)
+              for adapters in ("core+interp_engine", "interp_engine+lightning")
+              for slot in ("module", "datamodule")
+          )
+          assert got == expected, (
+              f"cold venv should register both slots of exactly the two circuit-tracer-free "
+              f"compositions.\n  got:      {got}\n  expected: {expected}"
           )
 
           # 5. The refusal this component exists for survives a minimal install. A bootstrap that comes
