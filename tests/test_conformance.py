@@ -24,12 +24,19 @@ forward rather than converting weights. That is what makes the value cases again
 meaningful: measured at 0.0, not at a tolerance. A backend that reimplemented the forward would have to
 declare otherwise and would get structural and causal cases only.
 
-`datamodule_flavour` is left at the default `"bridge"`, and that is a choice rather than an omission.
-`_tokens_from_batch` delegates to interpretune's `get_batch_input`, which resolves both `input` and
-`input_ids`, so this component is key-agnostic and either flavour would run. `"bridge"` passes an
-`attention_mask`, and the suite's position cases count REAL positions from that mask before comparing
-any set. The `"nnsight"` flavour would leave it nothing to count with, weakening the precondition that
-keeps a scope case from passing on a prompt too short to discriminate.
+`datamodule_flavour` is left at the default, which is now `"hf"` and was `"bridge"` when this file was
+written. Still not an omission, and the reason it can be left alone is worth stating because it is the
+property that has to hold, not the flavour name: the suite's position cases count REAL positions from an
+`attention_mask` before comparing any set, so a flavour that passes no mask silently weakens the
+precondition that stops a scope case passing on a prompt too short to discriminate.
+
+`"hf"` passes one (`model_input_names` includes `attention_mask`, left padding, same data-side settings
+as `bridge`), so the default is safe here AND better: it builds an adapter-free module config, which is
+what a hub adapter should compose over rather than the bridge's. `"nnsight"` would leave the position
+cases nothing to count with.
+
+This component is key-agnostic across flavours either way: `_tokens_from_batch` delegates to
+interpretune's `get_batch_input`, which resolves both `input` and `input_ids`.
 
 `load` stages and registers the component the way the hub loader does, which is the point of a
 DISTRIBUTED suite: a bundled adapter passes `None` and is simply importable, while a hub component has

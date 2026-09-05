@@ -42,6 +42,12 @@ test = [
     # dependency still has to be declared somewhere, and until the suite declares it, here is somewhere.
     "evaluate",
     "scikit-learn",
+    # And `accelerate`, which the suite's session needs to load a model with a `device_map` and which
+    # transformers raises about by name. This one was MASKED for two rounds: the venv where the suite
+    # first ran had it pulled in by transformer-lens, so it only appeared once the seed's imports were
+    # guarded upstream and a genuinely minimal install became possible. A dependency that arrives
+    # through another dependency is invisible until that other one leaves.
+    "accelerate",
 ]
 
 # A PACKAGE rather than a flat module, and the manifest ships as package data inside it. That is what
