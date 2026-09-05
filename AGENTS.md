@@ -10,8 +10,35 @@ into an Interpretune session. It is the first Interpretune adapter shipped as a 
 than bundled in the framework, so it doubles as the **reference pattern** for user-contributed adapter
 repos. Choices here get copied. Prefer the explicable option over the clever one.
 
-Consumers load it with `it.hub.pull("speediedan/it-interp-engine-adapter")` behind the
-`IT_TRUST_REMOTE_CODE=1` trust gate. Loading executes the entrypoint in the caller's process.
+Published (private) as `speediedan/it-interp-engine-adapter`. Consumers load it behind the
+`IT_TRUST_REMOTE_CODE=1` trust gate, and loading executes the entrypoint in the caller's process.
+
+**`it.hub.pull` alone is NOT enough, and this line used to say it was.** `pull` is manifest-first: with
+no config key it fetches `it_component.yaml` and returns `(manifest, commit)`, caching nothing else.
+`load_hub_adapter` then reads the entrypoint from the cached snapshot and raises "manifest declares
+adapters entrypoint 'adapter.py', which is not present in the snapshot" -- accurate, and easy to read as
+a broken publish rather than a missing fetch. `it.hub.load` does not close the gap either: it is
+cache-only and hydrates a CONFIGURATION by key, which an adapters component does not have.
+
+Interpretune has no API that fetches an adapters entrypoint from the Hub, so the middle step is a direct
+`hf_hub_download` pinned to the commit the manifest resolved to:
+
+```python
+import os
+from huggingface_hub import hf_hub_download
+from interpretune.hub.adapters import load_hub_adapter
+from interpretune.hub.components import IT_COMPONENTS_HUB_CACHE, pull_component_manifest
+
+repo = "speediedan/it-interp-engine-adapter"
+manifest, commit = pull_component_manifest(repo)                      # what `it.hub.pull(repo)` does
+hf_hub_download(repo, manifest["adapters"]["entrypoint"], revision=commit,
+                cache_dir=str(IT_COMPONENTS_HUB_CACHE))               # the step with no API
+load_hub_adapter(repo)                                                # executes, with IT_TRUST_REMOTE_CODE=1
+```
+
+Verified against the published revision, which then registers `interp_engine` and reproduces the seam's
+measurements. The gap is reported to the rails owner; delete the middle step and this note when an API
+covers it. Until then, a reader following the one-line version gets an error naming the wrong problem.
 
 ## The entrypoint is executed as a single file, and that constrains everything
 
