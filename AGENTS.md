@@ -37,8 +37,15 @@ load_hub_adapter(repo)                                                # executes
 ```
 
 Verified against the published revision, which then registers `interp_engine` and reproduces the seam's
-measurements. The gap is reported to the rails owner; delete the middle step and this note when an API
-covers it. Until then, a reader following the one-line version gets an error naming the wrong problem.
+measurements. Until the fix below reaches a release this repo floors on, a reader following the one-line
+version gets an error naming the wrong problem.
+
+**This is fixed in speediedan/interpretune#459**, which makes a key-less `it.hub.pull` materialize the
+payloads the manifest declares -- the adapters entrypoint among them -- pinned to the resolved commit.
+Loading still never downloads, and the error above remains the refusal for a genuinely partial snapshot.
+**Delete the middle step and this whole note once #459 is in a release this repo floors on**; the floor
+is `interpretune[conformance]`, so it arrives with the next one. Kept until then because consumers today
+run against released interpretune, where the three-step sequence is what works.
 
 ## The entrypoint is executed as a single file, and that constrains everything
 
