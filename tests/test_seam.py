@@ -620,6 +620,46 @@ class TestTheHookInventoryIsInterpretunesVocabulary:
         assert "blocks.5.hook_resid_post" in vocabulary
         assert "unembed.hook_in" in vocabulary
 
+    def test_layer_scoped_hooks_are_expanded_and_global_ones_are_not(self):
+        """The bug this caught: `resolver.resolve` accepts names that name nothing.
+
+        The inventory was first built by trying every base name BOTH bare and layer-qualified and
+        keeping whichever forms the resolver accepted, to avoid reading a private attribute. It accepts
+        `blocks.5.unembed.hook_out` and a bare `attn.hook_z`. While interpretune's vocabulary was 13
+        base names that produced a little junk and no visible harm; at 34 it produced 252 junk entries
+        out of 433, and four of five ordinary filters started refusing because each selected some
+        nonsense name the seam then could not map.
+        """
+        from interp_engine_adapter.adapter import _hook_vocabulary
+
+        vocabulary = set(_hook_vocabulary(_FakeEngineModel()))
+
+        # Layer-scoped: qualified, never bare.
+        assert "blocks.5.attn.hook_z" in vocabulary
+        assert "attn.hook_z" not in vocabulary
+
+        # Global: bare, never qualified.
+        assert "unembed.hook_in" in vocabulary
+        assert "blocks.5.unembed.hook_in" not in vocabulary
+        assert not any(n.startswith("blocks.") and ".unembed." in n for n in vocabulary)
+
+    def test_the_refusal_summarises_by_base_name_rather_than_reciting_every_hook(self):
+        """An unreadable refusal is one that gets worked around instead of understood.
+
+        A broad predicate selects a hundred names here, so the message groups by the base name a predicate is actually
+        written against and carries the counts that let a caller decide what to do.
+        """
+        from interp_engine_adapter.adapter import UnmappableHookError, _names_filter_to_list
+
+        with pytest.raises(UnmappableHookError) as excinfo:
+            _names_filter_to_list(lambda name: name.endswith("hook_out"), _FakeEngineModel())
+
+        message = str(excinfo.value)
+        assert "ln1.hook_out" in message, "the message should name the base, not every layer of it"
+        assert "blocks.0.ln1.hook_out" not in message
+        assert message.count("ln1.hook_out") == 1
+        assert "explicit list" in message
+
     def test_a_filter_matching_nothing_is_refused_rather_than_returning_an_empty_cache(self):
         from interp_engine_adapter.adapter import UnmappableHookError, _names_filter_to_list
 

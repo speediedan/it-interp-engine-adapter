@@ -393,46 +393,92 @@ def _layer_count(engine_model: Any) -> int:
 def _hook_vocabulary(engine_model: Any) -> list[str]:
     """Every hook name a caller could legitimately NAME for this model, in interpretune's vocabulary.
 
-    Built from `HookNameResolver(architecture).supported_hooks`, layer-expanded. Interpretune's, not the
-    engine's, and that choice is the whole point: `names_filter` is interpretune's vocabulary, so a
-    predicate written against it must be applied to the names interpretune uses. This is the same source
-    the bundled nnsight backend enumerates from.
+    Built from `HookNameResolver(architecture).supported_hooks`, expanded over layers for the components
+    that HAVE layers. Interpretune's vocabulary, not the engine's, and that choice is the whole point: a
+    `names_filter` is a predicate over the names interpretune uses.
 
-    THE OBVIOUS ALTERNATIVE IS WRONG, and quietly so, which is worth recording because it is the shape
-    this file keeps meeting. Enumerating FORWARD from the engine instead -- `EagerModel.points()` spelled
-    through `point_to_tlens_hook` -- yields 252 names on gpt2 and looks complete. It is not: the engine's
-    reverse table is one CANONICAL spelling per point, while its forward table accepts aliases, so
-    `blocks.5.hook_resid_post` is in that inventory and `blocks.5.hook_out` is not, though both name the
-    same tensor and interpretune's own vocabulary uses the second. A predicate over the forward-built
-    inventory therefore matched none of the conformance suite's five capture points while raising nothing
-    that pointed at spelling. Interpretune has this same alias-versus-canonical split internally, with a
-    TODO against it in `config/analysis.py`; this is a third instance of it.
+    THE OBVIOUS ALTERNATIVE IS WRONG, and quietly so. Enumerating FORWARD from the engine instead --
+    `EagerModel.points()` spelled through `point_to_tlens_hook` -- yields 252 names on gpt2 and looks
+    complete. It is not: the engine's reverse table holds one CANONICAL spelling per point while its
+    forward table accepts aliases, so `blocks.5.hook_resid_post` is in that inventory and
+    `blocks.5.hook_out` is not, though both name the same tensor and interpretune uses the second. A
+    predicate over the forward-built inventory matched NONE of the conformance suite's capture points.
 
-    Expansion is BEHAVIOURAL rather than read off the resolver's private mapping: each base name is tried
-    both bare and layer-qualified, and whichever forms the resolver accepts are kept. That costs a few
-    hundred string operations once and does not couple this file to a private attribute the way reading
-    `_mapping.hook_mappings[...].envoy_path` would.
+    THE LAYER SPLIT COMES FROM `component_map_for`, AND GUESSING IT WAS A REAL BUG. This first tried
+    every base name both bare and layer-qualified and kept whichever forms `resolver.resolve` accepted,
+    to avoid reading a private attribute. `resolve` is more permissive than that assumed: it accepts
+    `blocks.5.unembed.hook_out` and a bare `attn.hook_z`, neither of which names anything. While
+    interpretune's vocabulary was 13 base names that produced a little junk and no visible harm. When it
+    grew to 34, the junk became 252 of 433 entries and FOUR OF FIVE ordinary filters -- `endswith
+    hook_out`, `endswith hook_in`, everything at one layer, anything mlp -- began refusing outright,
+    because each selected some nonsense name this seam then could not map.
+
+    `ComponentMap.block_components()` and `.global_components()` answer it properly and publicly, so a
+    block component is expanded over layers and a global one is offered bare, and neither is offered as
+    the other. Note the empty-string component: `hook_resid_post` and friends belong to the block itself,
+    which `block_components()` reports as `''`.
     """
     from interpretune.analysis.backends.hook_mapping import HookNameResolver
+    from interpretune.analysis.points import UnknownPointError, component_map_for, parse
 
     architecture = type(getattr(engine_model, "hf_model", engine_model)).__name__
     try:
         resolver = HookNameResolver(architecture)
-    except ValueError as exc:
+        component_map = component_map_for(architecture)
+    except (KeyError, ValueError) as exc:
         raise UnmappableHookError(
             f"a callable names_filter needs this backend's hook inventory, and interpretune has no hook "
             f"mapping for {architecture!r} ({exc}). Pass an explicit list of hook names instead."
         ) from exc
 
+    per_layer = set(component_map.block_components())
+    global_only = set(component_map.global_components())
+    layers = range(_layer_count(engine_model))
+
     names: list[str] = []
     for base in resolver.supported_hooks:
-        for candidate in (base, *(f"blocks.{layer}.{base}" for layer in range(_layer_count(engine_model)))):
-            try:
-                resolver.resolve(candidate)
-            except Exception:
-                continue
-            names.append(candidate)
+        try:
+            component = parse(base).component
+        except UnknownPointError:
+            # The resolver names a hook the point vocabulary cannot parse. Skipped rather than guessed
+            # at: a name whose component is unknown cannot be placed in or out of a block, and either
+            # placement invents a hook.
+            continue
+        if component in per_layer:
+            names.extend(f"blocks.{layer}.{base}" for layer in layers)
+        elif component in global_only:
+            names.append(base)
     return names
+
+
+def _partial_selection_message(selected: list[str], mappable: list[str], unmappable: list[str]) -> str:
+    """Explain a refused predicate WITHOUT reciting it.
+
+    A broad filter over interpretune's vocabulary can select a hundred names here, so listing every
+    unmappable one produces a message nobody finishes reading -- and an unreadable refusal is a refusal
+    that gets worked around rather than understood. Summarised by BASE NAME instead, which is what a
+    predicate is actually written against: `blocks.0.ln1.hook_out` through `blocks.11.ln1.hook_out` are
+    one fact about this backend, not twelve.
+
+    The counts are given because they carry the decision. A caller told "8 of 100 selected names are
+    unmappable" can weigh narrowing the predicate against passing an explicit list; a caller told only
+    "refused" cannot.
+    """
+
+    def base(name: str) -> str:
+        parts = name.split(".")
+        return ".".join(parts[2:]) if len(parts) >= 3 and parts[0] == "blocks" and parts[1].isdigit() else name
+
+    bases = sorted({base(name) for name in unmappable})
+    shown = ", ".join(bases[:8]) + (f", and {len(bases) - 8} more" if len(bases) > 8 else "")
+    return (
+        f"the callable names_filter selected {len(selected)} hook names, {len(unmappable)} of which this "
+        f"backend cannot capture at. interp-engine has no point for these: {shown}. "
+        f"Refused rather than captured PARTIALLY: a cache holding the other {len(mappable)} is "
+        "indistinguishable from a complete one at the call site, and a caller iterating it would compute "
+        "over a filter that silently meant less than it said. Narrow the predicate to exclude those "
+        "names, or pass an explicit list of the hooks you want."
+    )
 
 
 def _names_filter_to_list(names_filter: Any, engine_model: Any) -> list[str]:
@@ -464,20 +510,16 @@ def _names_filter_to_list(names_filter: Any, engine_model: Any) -> list[str]:
                 "than returned, because a filter that silently matches nothing is indistinguishable from "
                 "one that ran and found nothing to capture."
             )
-        unmappable = {}
+        mappable, unmappable = [], []
         for name in selected:
             try:
                 _Seam.point_for(name, engine_model)
-            except UnmappableHookError as exc:
-                unmappable[name] = str(exc)
+            except UnmappableHookError:
+                unmappable.append(name)
+            else:
+                mappable.append(name)
         if unmappable:
-            raise UnmappableHookError(
-                "the callable names_filter selected hook names this backend cannot capture at: "
-                + "; ".join(f"{name} ({reason})" for name, reason in unmappable.items())
-                + ". Refused rather than captured PARTIALLY: a cache holding the mappable subset is "
-                "indistinguishable from a complete one at the call site, and the caller would compute "
-                "over a filter that silently meant less than it said."
-            )
+            raise UnmappableHookError(_partial_selection_message(selected, mappable, unmappable))
         return selected
     return list(names_filter)
 
