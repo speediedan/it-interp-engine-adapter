@@ -8,6 +8,9 @@ moving a signature turns THIS repo red rather than a framework nobody expects to
 
 from __future__ import annotations
 
+import contextlib
+import pathlib
+
 import pytest
 
 # INTERNALS COME FROM `.adapter`, NOT FROM THE PACKAGE, and the distinction is load-bearing rather than
@@ -111,6 +114,79 @@ def _fresh_registry():
 
     register_dynamic_adapter(ADAPTER_NAME, source="speediedan/it-interp-engine-adapter")
     return CompositionRegistry()
+
+
+@contextlib.contextmanager
+def _all_declared_satisfiable(declared):
+    """Present `declared` to the entrypoint as the rails' satisfiable set, then restore.
+
+    The entrypoint reads `supported_compositions()`, which is a ContextVar the rails set. Setting it here exercises the
+    HUB path rather than the direct-import path, which is the one that consumes the manifest at all -- the direct path
+    never sees it.
+    """
+    from interpretune.hub import adapters as hub_adapters
+
+    token = hub_adapters._SUPPORTED_COMPOSITIONS.set(tuple(sorted(declared)))
+    try:
+        yield
+    finally:
+        hub_adapters._SUPPORTED_COMPOSITIONS.reset(token)
+
+
+class TestTheManifestDeclaresWhatRegisters:
+    """The manifest and the code must agree on COMPONENT SLOTS, not only on adapter sets.
+
+    The rails check the other direction and deliberately stop short of this one. Their invariant walks
+    the satisfiable set and drops the component name (`wanted = set(entry_key[1:])`), so a manifest that
+    declares `module` while the code also registers `datamodule` loads perfectly. Nothing fails, and the
+    only visible consequence is the PUBLISHED CARD, which renders one row per declared entry: a reader
+    comparing components sees no datamodule and concludes this one has none.
+
+    That is the recurring shape in this repo -- correct locally, misleading globally, silent -- so the
+    agreement is asserted here, where it is this component's own business, rather than wished onto a
+    framework that has a considered reason not to check it. Overstating already fails at load; this is
+    the understating half.
+    """
+
+    def _declared_keys(self):
+        import yaml
+
+        manifest = yaml.safe_load(pathlib.Path("src/interp_engine_adapter/it_component.yaml").read_text())
+        return {
+            (str(entry["component"]), *sorted(str(a) for a in entry["adapters"]))
+            for entry in manifest["adapters"]["compositions"]
+        }
+
+    def test_every_declared_slot_is_registered_and_no_others(self):
+        declared = self._declared_keys()
+        registry = _fresh_registry()
+
+        # Every declared composition treated as satisfiable, which is what a fully equipped environment
+        # sees. The conditional entries are covered by the registration tests above under both outcomes.
+        import interp_engine_adapter.adapter as mod
+
+        if mod._circuit_tracer_pairing() is None:
+            declared = {k for k in declared if "circuit_tracer" not in k}
+
+        with _all_declared_satisfiable(declared):
+            InterpEngineAdapter.register_adapter_ctx(registry)
+
+        registered = {
+            (str(key[0]), *sorted(str(getattr(a, "value", a)) for a in key[1:]))
+            for key in registry.available_compositions()
+        }
+        assert registered == declared, (
+            f"manifest and registration disagree.\n  declared not registered: {sorted(declared - registered)}"
+            f"\n  registered not declared: {sorted(registered - declared)}"
+        )
+
+    def test_both_slots_are_declared_for_every_adapter_set(self):
+        """The specific asymmetry that was there: `module` declared, `datamodule` registered silently."""
+        by_adapters: dict[tuple[str, ...], set[str]] = {}
+        for component, *adapters in self._declared_keys():
+            by_adapters.setdefault(tuple(adapters), set()).add(component)
+        for adapters, slots in by_adapters.items():
+            assert slots == {"module", "datamodule"}, f"{'+'.join(adapters)} declares only {sorted(slots)}"
 
 
 class TestRegistration:
@@ -270,11 +346,21 @@ class TestManifestDeclaresTheConditionality:
 
         return yaml.safe_load((Path(mod.__file__).parent / "it_component.yaml").read_text())
 
-    def test_the_circuit_tracer_composition_declares_requires(self):
+    def test_every_circuit_tracer_slot_declares_requires(self):
+        """BOTH slots, and each independently.
+
+        A composition entry's identity is (component, *adapters), so the module and datamodule slots of
+        the conditional composition are two entries and the rails evaluate their `requires` separately.
+        Declaring it on one would make the other unconditionally satisfiable, and the entrypoint would
+        be handed a satisfiable datamodule slot for a composition whose module slot was skipped.
+        """
         entries = self._manifest()["adapters"]["compositions"]
         ct = [e for e in entries if "circuit_tracer" in e["adapters"]]
-        assert len(ct) == 1, "expected exactly one circuit-tracer composition"
-        assert ct[0].get("requires", {}).get("pip") == ["circuit-tracer"]
+        assert {e["component"] for e in ct} == {"module", "datamodule"}
+        for entry in ct:
+            assert entry.get("requires", {}).get("pip") == ["circuit-tracer"], (
+                f"the {entry['component']} slot does not declare its requirement"
+            )
 
     def test_the_core_compositions_declare_no_requires(self):
         """They must not, or an environment without circuit-tracer would get nothing at all."""
@@ -286,7 +372,11 @@ class TestManifestDeclaresTheConditionality:
     def test_every_declared_composition_is_one_the_code_can_register(self):
         """Manifest and code compared entry for entry, in the direction that catches drift: a manifest advertising
         something the code cannot produce is a promise to a reader that nothing will keep."""
-        declared = {("module", *sorted(e["adapters"])) for e in self._manifest()["adapters"]["compositions"]}
+        declared = {
+            ("module", *sorted(e["adapters"]))
+            for e in self._manifest()["adapters"]["compositions"]
+            if e["component"] == "module"
+        }
         known = {InterpEngineAdapter._composition_key(c) for c, _, _ in InterpEngineAdapter._COMPOSITIONS}
         assert declared == known, f"manifest and code disagree: {declared ^ known}"
 
