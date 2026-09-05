@@ -37,6 +37,7 @@ from interpretune.analysis.backends.capabilities import (
 )
 from interpretune.analysis.backends.interventions import normalize_position_scope
 from interpretune.analysis.ops.base import get_batch_input
+from interpretune.adapters.core import CoreAdapter
 from interpretune.base import CoreHelperAttributes, BaseITModule
 from interpretune.protocol import Adapter
 
@@ -82,6 +83,24 @@ class UnmappableHookError(ValueError):
     """A TransformerLens hook name has no honest counterpart among the engine's points."""
 
 
+class EngineHasNoPointError(UnmappableHookError):
+    """The ENGINE has no point for this name -- as distinct from this adapter refusing it.
+
+    A subclass, so every capture path that catches `UnmappableHookError` still refuses: from the caller's
+    seat "cannot capture here" is one outcome and the reason does not change what they can do.
+
+    It exists for the one place where the reason IS the whole question. `_Seam.refuse_if_ambiguous`
+    guards circuit-tracer's own resolver, and it must propagate only THIS adapter's refusals; a name the
+    engine merely does not know has to fall through to circuit-tracer, which may well resolve it. Before
+    this class existed the two were the same exception, so widening the message on engine gaps silently
+    converted "interp-engine has no point for `ln2.hook_normalized`" into "this adapter refuses
+    `ln2.hook_normalized`", and circuit-tracer stopped seeing a hook it resolves perfectly well.
+
+    That regression was invisible in every environment without circuit-tracer installed, which is every
+    environment except the GPU lane.
+    """
+
+
 class _Seam:
     """The one place this adapter touches ``interp_engine``.
 
@@ -95,6 +114,34 @@ class _Seam:
     #: ``ln2.hook_out`` and ``mlp.hook_in`` are the same tensor (measured identical, cos 1.000000 on
     #: gemma-3-1b-it layer 5), so both are accepted and mean the same point.
     _SUBLAYER_INPUT_ALIASES = {"mlp.hook_in": "mlp_in", "ln2.hook_out": "mlp_in", "attn.hook_in": "attn_in"}
+
+    #: Block-level names interp-engine's mapper has no entry for, though the tensor they name is one
+    #: the engine addresses under another name. NOT the same category as `_REFUSED` below, and keeping
+    #: the two apart is the entire discipline of this file:
+    #:
+    #:   `_REFUSED` names tensors that DIFFER. `blocks.N.hook_mlp_in` and `mlp.hook_in` are a whole
+    #:   normalization apart (cos 0.088 on gemma-3-1b-it layer 5). Mapping one to the other would answer
+    #:   a question the caller did not ask, and that substitution is why this adapter exists.
+    #:
+    #:   This table names tensors that are IDENTICAL, and identical by measurement rather than by
+    #:   argument. `blocks.5.hook_in` is what interpretune's own resolver resolves to a forward pre-hook
+    #:   on block 5; captured that way it agrees with the engine's `resid_pre.5` at max|d| = 0.0, and
+    #:   with `blocks.4.hook_out` (which the engine DOES accept, as `resid_post.4`) at 0.0 and cos
+    #:   1.000000. So the engine accepts a block's output under this spelling and refuses its input, one
+    #:   side of a symmetric pair. That is an alias gap upstream, reported there; the entry here is what
+    #:   keeps this adapter usable in the meantime, and it should be deleted when the engine grows it.
+    #:
+    #: A future session adding to this table owes the same measurement. "These obviously name the same
+    #: thing" is precisely the reasoning `_REFUSED` exists to refuse.
+    _MEASURED_ALIASES = {"hook_in": "resid_pre"}
+
+    #: The same category, for names carrying no layer. `unembed.hook_in` is the input to the unembedding,
+    #: which interpretune's resolver resolves to a forward pre-hook on `lm_head`; captured that way it
+    #: agrees with the engine's global `final_norm` point at max|d| = 0.0, cos 1.000000 on gpt2. The
+    #: engine HAS the tensor and lists `final_norm` in `UNMAPPED_TLENS`, meaning "no TransformerLens
+    #: spelling" rather than "cannot capture", so this is the same one-sided gap as `hook_in` and not a
+    #: capability this backend lacks.
+    _MEASURED_GLOBAL_ALIASES = {"unembed.hook_in": "final_norm"}
 
     #: Legacy block-level names that LOOK like sublayer inputs and are not. Refused with the name to
     #: use instead; see NOTE [hook names lie].
@@ -123,6 +170,11 @@ class _Seam:
         """
         try:
             cls.point_for(f"blocks.0.{bare_hook}", None)
+        except EngineHasNoPointError:
+            # The engine not knowing a name is not this adapter's refusal, and circuit-tracer resolves
+            # names the engine has no point for -- `ln2.hook_normalized` among them. Ordered before the
+            # base class deliberately: it IS an `UnmappableHookError`, so the broad clause would catch it.
+            return
         except UnmappableHookError:
             raise
         except Exception:
@@ -137,7 +189,7 @@ class _Seam:
         ``hook_mlp_out``/``hook_attn_out`` are the POST-norm contributions. On gemma-3-1b-it layer 5
         the string-only reading is cos 0.109 / 0.221 against the model-aware one.
         """
-        from interp_engine import Address, tlens_hook_to_point
+        from interp_engine import Address, UnmappedHook, tlens_hook_to_point
 
         layer, base = cls._split(hook_name)
         if base in cls._REFUSED:
@@ -152,7 +204,40 @@ class _Seam:
             )
         if base in cls._SUBLAYER_INPUT_ALIASES and layer is not None:
             return Address(cls._SUBLAYER_INPUT_ALIASES[base], layer)
-        return tlens_hook_to_point(hook_name, model)
+        if base in cls._MEASURED_ALIASES and layer is not None:
+            # GUARDED on the architecture that makes the identity false. The engine treats the mirror
+            # name `hook_out` as stream-dependent -- `resid_post` on an ordinary trunk, the whole stream
+            # bundle on a hyper-connection model -- so a block's input is equally stream-dependent, and
+            # `resid_pre` is only the block's input where there is ONE residual stream to be pre of.
+            # Refused rather than mapped there: the measurement behind this table was taken on gpt2, and
+            # a measurement does not generalise to an architecture it was not taken on.
+            from interp_engine.mappers import has_hyper_connections
+
+            if has_hyper_connections(model):
+                raise UnmappableHookError(
+                    f"{hook_name!r} names a block input, and this model carries hyper-connections, so it "
+                    "has several residual streams rather than one. This adapter maps that name to "
+                    "'resid_pre' only on single-stream models, where the two were measured identical. "
+                    "Ask for the specific stream you mean."
+                )
+            return Address(cls._MEASURED_ALIASES[base], layer)
+        if base in cls._MEASURED_GLOBAL_ALIASES and layer is None:
+            return Address(cls._MEASURED_GLOBAL_ALIASES[base])
+        try:
+            return tlens_hook_to_point(hook_name, model)
+        except UnmappedHook as exc:
+            # The engine's own text, given this adapter's voice. A caller who reaches here is holding an
+            # interpretune hook name and needs to know what THIS component can do with it; the engine's
+            # message lists ITS point vocabulary, which is not the vocabulary the caller wrote in.
+            #
+            # `EngineHasNoPointError`, NOT a bare `UnmappableHookError`: see that class. Capture paths
+            # treat them alike; the circuit-tracer guard must not.
+            raise EngineHasNoPointError(
+                f"{hook_name!r} is a hook name interpretune recognises and this backend cannot capture "
+                f"at: interp-engine's mapper has no point for it ({exc}). Ask for a name this backend "
+                "maps, or capture through a backend that covers it. Not resolved to a nearby point: the "
+                "neighbouring tensor is a different tensor."
+            ) from exc
 
     @staticmethod
     def wrap_model(model: Any, tokenizer: Any, cfg: InterpEngineConfig, model_id: str) -> Any:
@@ -175,7 +260,9 @@ class _Seam:
         )
 
     @staticmethod
-    def capture(engine_model: Any, tokens: Any, points: list[Any], detach: bool = True) -> Any:
+    def capture(
+        engine_model: Any, tokens: Any, points: list[Any], detach: bool = True, attention_mask: Any = None
+    ) -> Any:
         """One forward pass, capturing the requested points.
 
         The sync free function is used deliberately: interpretune's ``*_step`` and analysis-op call
@@ -184,10 +271,10 @@ class _Seam:
         """
         from interp_engine import run_with_cache
 
-        return run_with_cache(engine_model, tokens, points, detach=detach)
+        return run_with_cache(engine_model, tokens, points, detach=detach, attention_mask=attention_mask)
 
     @staticmethod
-    def steer(engine_model: Any, tokens: Any, specs: list[Any]) -> Any:
+    def steer(engine_model: Any, tokens: Any, specs: list[Any], attention_mask: Any = None) -> Any:
         """Run one forward pass with steering applied AT THE LAST PROMPT POSITION, returning logits.
 
         ``steer`` is a CONTEXT MANAGER yielding a hook manager, not a call, so the forward has to
@@ -235,7 +322,7 @@ class _Seam:
             for scope, group in grouped.items():
                 mask = last_only if scope is PositionScope.LAST_TOKEN else None
                 stack.enter_context(steer(engine_model, group, prompt_token_ids=tokens, position_mask=mask))
-            return _logits_of(run_with_cache(engine_model, tokens, []))
+            return _logits_of(run_with_cache(engine_model, tokens, [], attention_mask=attention_mask))
 
     @staticmethod
     def steer_spec(
@@ -247,7 +334,7 @@ class _Seam:
         return SteerSpec(vector=vector, layer=layer, coeff=coeff, method=method, point=point)
 
     @staticmethod
-    def forward(engine_model: Any, tokens: Any) -> Any:
+    def forward(engine_model: Any, tokens: Any, attention_mask: Any = None) -> Any:
         """A plain forward pass, no capture and no steering.
 
         ``EagerModel`` has no ``forward`` attribute and its instances are not callable. This said
@@ -262,9 +349,11 @@ class _Seam:
         """
         from interp_engine import run_with_cache
 
-        return _logits_of(run_with_cache(engine_model, tokens, []))
+        return _logits_of(run_with_cache(engine_model, tokens, [], attention_mask=attention_mask))
 
-    async def capture_async(engine_model: Any, tokens: Any, points: list[Any], detach: bool = True) -> Any:
+    async def capture_async(
+        engine_model: Any, tokens: Any, points: list[Any], detach: bool = True, attention_mask: Any = None
+    ) -> Any:
         """The notebook path: one forward pass capturing the requested points, awaited.
 
         ``run_with_cache`` REFUSES inside a running event loop by design, and Jupyter always has one,
@@ -283,6 +372,7 @@ class _Seam:
         # SILENT here -- the call would keep working and capture at addresses derived from token ids.
         # `test_argument_order_matches_the_engine` pins the engine's order so that surfaces as a test
         # failure rather than as a wrong tensor.
+        _refuse_padding_without_mask_support(tokens, attention_mask)
         return await engine_model.capture(tokens, points, detach=detach)
 
     @staticmethod
@@ -309,21 +399,154 @@ def _tokens_from_batch(batch: dict[str, Any]) -> Any:
     return get_batch_input(batch)
 
 
-def _names_filter_to_list(names_filter: Any) -> list[str]:
+def _layer_count(engine_model: Any) -> int:
+    """Layer count for the wrapped model, read from the HuggingFace config.
+
+    `num_hidden_layers` is the canonical field and `n_layer` the GPT-2-era alias; both are checked
+    because the engine wraps the HF model IN PLACE and does not normalize its config. Zero rather than a
+    guess when neither is present: an empty inventory refuses every callable filter visibly, where a
+    guessed depth would build a SHORT inventory and quietly drop the model's upper layers -- a filter
+    over layers 0..11 on a 32-layer model returns a cache that looks entirely ordinary.
+    """
+    cfg = getattr(getattr(engine_model, "hf_model", None), "config", None) or getattr(engine_model, "config", None)
+    for depth_field in ("num_hidden_layers", "n_layer"):
+        value = getattr(cfg, depth_field, None)
+        if isinstance(value, int):
+            return value
+    return 0
+
+
+def _hook_vocabulary(engine_model: Any) -> list[str]:
+    """Every hook name a caller could legitimately NAME for this model, in interpretune's vocabulary.
+
+    Built from `HookNameResolver(architecture).supported_hooks`, expanded over layers for the components
+    that HAVE layers. Interpretune's vocabulary, not the engine's, and that choice is the whole point: a
+    `names_filter` is a predicate over the names interpretune uses.
+
+    THE OBVIOUS ALTERNATIVE IS WRONG, and quietly so. Enumerating FORWARD from the engine instead --
+    `EagerModel.points()` spelled through `point_to_tlens_hook` -- yields 252 names on gpt2 and looks
+    complete. It is not: the engine's reverse table holds one CANONICAL spelling per point while its
+    forward table accepts aliases, so `blocks.5.hook_resid_post` is in that inventory and
+    `blocks.5.hook_out` is not, though both name the same tensor and interpretune uses the second. A
+    predicate over the forward-built inventory matched NONE of the conformance suite's capture points.
+
+    THE LAYER SPLIT COMES FROM `component_map_for`, AND GUESSING IT WAS A REAL BUG. This first tried
+    every base name both bare and layer-qualified and kept whichever forms `resolver.resolve` accepted,
+    to avoid reading a private attribute. `resolve` is more permissive than that assumed: it accepts
+    `blocks.5.unembed.hook_out` and a bare `attn.hook_z`, neither of which names anything. While
+    interpretune's vocabulary was 13 base names that produced a little junk and no visible harm. When it
+    grew to 34, the junk became 252 of 433 entries and FOUR OF FIVE ordinary filters -- `endswith
+    hook_out`, `endswith hook_in`, everything at one layer, anything mlp -- began refusing outright,
+    because each selected some nonsense name this seam then could not map.
+
+    `ComponentMap.block_components()` and `.global_components()` answer it properly and publicly, so a
+    block component is expanded over layers and a global one is offered bare, and neither is offered as
+    the other. Note the empty-string component: `hook_resid_post` and friends belong to the block itself,
+    which `block_components()` reports as `''`.
+    """
+    from interpretune.analysis.backends.hook_mapping import HookNameResolver
+    from interpretune.analysis.points import UnknownPointError, component_map_for, parse
+
+    architecture = type(getattr(engine_model, "hf_model", engine_model)).__name__
+    try:
+        resolver = HookNameResolver(architecture)
+        component_map = component_map_for(architecture)
+    except (KeyError, ValueError) as exc:
+        raise UnmappableHookError(
+            f"a callable names_filter needs this backend's hook inventory, and interpretune has no hook "
+            f"mapping for {architecture!r} ({exc}). Pass an explicit list of hook names instead."
+        ) from exc
+
+    per_layer = set(component_map.block_components())
+    global_only = set(component_map.global_components())
+    layers = range(_layer_count(engine_model))
+
+    names: list[str] = []
+    for base in resolver.supported_hooks:
+        try:
+            component = parse(base).component
+        except UnknownPointError:
+            # The resolver names a hook the point vocabulary cannot parse. Skipped rather than guessed
+            # at: a name whose component is unknown cannot be placed in or out of a block, and either
+            # placement invents a hook.
+            continue
+        if component in per_layer:
+            names.extend(f"blocks.{layer}.{base}" for layer in layers)
+        elif component in global_only:
+            names.append(base)
+    return names
+
+
+def _partial_selection_message(selected: list[str], mappable: list[str], unmappable: list[str]) -> str:
+    """Explain a refused predicate WITHOUT reciting it.
+
+    A broad filter over interpretune's vocabulary can select a hundred names here, so listing every
+    unmappable one produces a message nobody finishes reading -- and an unreadable refusal is a refusal
+    that gets worked around rather than understood. Summarised by BASE NAME instead, which is what a
+    predicate is actually written against: `blocks.0.ln1.hook_out` through `blocks.11.ln1.hook_out` are
+    one fact about this backend, not twelve.
+
+    The counts are given because they carry the decision. A caller told "8 of 100 selected names are
+    unmappable" can weigh narrowing the predicate against passing an explicit list; a caller told only
+    "refused" cannot.
+    """
+
+    def base(name: str) -> str:
+        parts = name.split(".")
+        return ".".join(parts[2:]) if len(parts) >= 3 and parts[0] == "blocks" and parts[1].isdigit() else name
+
+    bases = sorted({base(name) for name in unmappable})
+    shown = ", ".join(bases[:8]) + (f", and {len(bases) - 8} more" if len(bases) > 8 else "")
+    return (
+        f"the callable names_filter selected {len(selected)} hook names, {len(unmappable)} of which this "
+        f"backend cannot capture at. interp-engine has no point for these: {shown}. "
+        f"Refused rather than captured PARTIALLY: a cache holding the other {len(mappable)} is "
+        "indistinguishable from a complete one at the call site, and a caller iterating it would compute "
+        "over a filter that silently meant less than it said. Narrow the predicate to exclude those "
+        "names, or pass an explicit list of the hooks you want."
+    )
+
+
+def _names_filter_to_list(names_filter: Any, engine_model: Any) -> list[str]:
     """Normalize interpretune's ``NamesFilter`` to a concrete list of hook names.
 
-    A CALLABLE filter cannot be enumerated without the model's hook inventory, which the engine does not expose as
-    TransformerLens names, so it is refused rather than silently under-capturing.
+    A CALLABLE filter is a predicate over TransformerLens names, so it is applied to this backend's
+    mappable inventory rather than refused. This reversed an earlier refusal, and the reasoning matters
+    more than the change: the refusal said the engine's inventory could not be enumerated in
+    TransformerLens vocabulary, and by the time it was checked that was no longer true. What makes
+    applying the predicate honest is not that the inventory is complete in absolute terms -- it is not,
+    6 point names have no TransformerLens spelling -- but that those points cannot be NAMED by a caller
+    in either direction, so no predicate can be written that ought to have matched them. See
+    `_mappable_hook_names`.
+
+    Interpretune's core turns an explicit list into a callable at setup, so the suite's explicit list
+    arrives here as a predicate; refusing callables therefore refused ordinary use, not an exotic one.
     """
     if names_filter is None:
         raise UnmappableHookError("a names_filter is required: this backend cannot capture 'everything'")
     if isinstance(names_filter, str):
         return [names_filter]
     if callable(names_filter):
-        raise UnmappableHookError(
-            "callable names_filters are not supported by this backend: it cannot enumerate the model's "
-            "hook inventory in TransformerLens vocabulary. Pass an explicit list of hook names."
-        )
+        vocabulary = _hook_vocabulary(engine_model)
+        selected = [name for name in vocabulary if names_filter(name)]
+        if not selected:
+            raise UnmappableHookError(
+                f"the callable names_filter matched none of the {len(vocabulary)} hook names interpretune "
+                "recognises for this model. Nothing was captured, and an empty cache is refused rather "
+                "than returned, because a filter that silently matches nothing is indistinguishable from "
+                "one that ran and found nothing to capture."
+            )
+        mappable, unmappable = [], []
+        for name in selected:
+            try:
+                _Seam.point_for(name, engine_model)
+            except UnmappableHookError:
+                unmappable.append(name)
+            else:
+                mappable.append(name)
+        if unmappable:
+            raise UnmappableHookError(_partial_selection_message(selected, mappable, unmappable))
+        return selected
     return list(names_filter)
 
 
@@ -471,6 +694,56 @@ def _logits_of(cache: Any) -> Any:
     return logits
 
 
+def _attention_mask_from_batch(batch: dict[str, Any]) -> Any:
+    """The batch's attention mask, or ``None`` when it carries none.
+
+    THIS IS NOT AN OPTIONAL EXTRA, and the measurement that says so belongs in front of the next reader.
+    ``run_with_cache`` takes ``attention_mask`` and defaults it to ``None``, which runs the forward
+    ATTENDING TO PAD POSITIONS. On gpt2 with a two-row left-padded batch, the padded row's last-position
+    logits -- the ones a classification consumer reads -- differ from HuggingFace's by 54.9, and captured
+    ``resid_post`` differs by 44.7. With the mask threaded, both agree to 0.0.
+
+    Nothing raises either way. Shapes agree either way. Only the numbers are wrong, and only for rows
+    shorter than the longest in their batch, which is why a suite running at batch size 1 cannot see it:
+    an unpadded batch has no mask to ignore. This adapter shipped that defect behind a batch refusal that
+    was itself a misreading, so the refusal was hiding a real bug rather than standing in for one.
+
+    Read directly rather than through `get_batch_input`, which resolves INPUT keys across backends and
+    has no equivalent for the mask.
+    """
+    if not isinstance(batch, dict):
+        return getattr(batch, "attention_mask", None)
+    return batch.get("attention_mask")
+
+
+def _refuse_padding_without_mask_support(tokens: Any, attention_mask: Any) -> None:
+    """Refuse a PADDED batch on a path that cannot carry the mask, rather than running it unmasked.
+
+    ``EagerModel.capture`` -- the async surface the notebook path uses -- has no ``attention_mask``
+    parameter, while the sync ``run_with_cache`` does. So the async path runs one prompt, or an evenly
+    sized batch, correctly, and cannot run a padded one correctly.
+
+    The refusal is scoped to what is actually broken: an unpadded batch goes through, because there is no
+    mask to lose. It replaced a blanket single-prompt refusal that refused far more than the real
+    limitation. That one came from misreading the engine's protocol-arm message, which said "takes one
+    prompt at a time on the GPT2LMHeadModel backend" and was naming the WRONG MODEL rather than reporting
+    a batching limit -- the backend was being handed the raw HuggingFace model instead of the engine one.
+    """
+    if attention_mask is None:
+        return
+    try:
+        padded = bool((attention_mask == 0).any())
+    except (AttributeError, TypeError):
+        return
+    if padded:
+        raise UnmappableHookError(
+            "the async capture path cannot carry an attention mask, and this batch is padded. Running it "
+            "here would attend to pad positions and return numbers that look right and are not (measured "
+            "at 54.9 on a gpt2 padded row's last-position logits). Use the sync capture path, which "
+            "threads the mask, or pass an unpadded batch."
+        )
+
+
 def _prompt_length(tokens: Any) -> int:
     """Number of prompt positions in ``tokens``, or 0 when it cannot be told.
 
@@ -482,6 +755,44 @@ def _prompt_length(tokens: Any) -> int:
     if shape is None:
         return 0
     return int(shape[-1]) if len(shape) >= 1 else 0
+
+
+_SPEC_UNSET = object()
+
+
+def _spec_field(spec: Any, name: str, default: Any = _SPEC_UNSET) -> Any:
+    """Read one field off an intervention spec, whatever shape it arrived in.
+
+    Specs reach a backend in TWO shapes and both are normal. A caller building them in process passes
+    interpretune's `InterventionSpec`, a NamedTuple. A spec that has been through the analysis store --
+    which is every spec the conformance runner produces, and every spec a saved analysis replays --
+    comes back as a plain DICT, because that is what the columnar store round-trips to. The bundled
+    circuit-tracer backend reads both for exactly this reason: attributes on its write path, subscripts
+    on its read path.
+
+    Reading only attributes fails on the dict shape with `'dict' object has no attribute
+    'intervention_tensor'`, which names neither this backend nor the shape mismatch, and sends the
+    reader looking for a missing field rather than a missing accessor. Six conformance cases failed
+    that way.
+
+    A missing field with no default RAISES rather than returning None: `scale_factor` defaulting to None
+    reaches the engine as a coefficient and multiplies to a TypeError three frames away, and
+    `intervention_tensor` defaulting to None steers with nothing while completing normally.
+    """
+    if hasattr(spec, "keys"):
+        if name in spec:
+            return spec[name]
+    else:
+        value = getattr(spec, name, _SPEC_UNSET)
+        if value is not _SPEC_UNSET:
+            return value
+    if default is _SPEC_UNSET:
+        raise UnmappableHookError(
+            f"an intervention spec is missing {name!r} (spec is a {type(spec).__name__}). Refused rather "
+            "than defaulted: a missing coefficient or tensor completes the forward and returns a result "
+            "that is not the intervention the caller asked for."
+        )
+    return default
 
 
 def _intervention_targets(interventions: Any, model: Any) -> list[tuple[int, str, Any]]:
@@ -515,7 +826,10 @@ def _intervention_targets(interventions: Any, model: Any) -> list[tuple[int, str
         #
         # The bundled backends never meet this because they normalize to a list before iterating; this
         # seam takes the caller's value directly, so telling a spec from a sequence of specs is its job.
-        for spec in [specs] if hasattr(specs, "_fields") or not isinstance(specs, (list, tuple)) else specs:
+        # `keys` catches the dict shape for the same reason `_fields` catches the NamedTuple one: both
+        # are SINGLE specs that would otherwise be iterated into their own parts.
+        single = hasattr(specs, "_fields") or hasattr(specs, "keys") or not isinstance(specs, (list, tuple))
+        for spec in [specs] if single else specs:
             targets.append((layer, getattr(address, "name", "resid_post"), spec))
     return targets
 
@@ -557,28 +871,98 @@ class InterpEngineCaptureMixin(InterpEngineAttributeMixin):
         #
         # There is no model-backend REGISTRY to register into (backends are adapter-attached by
         # construction), so a hub adapter reaches this seam exactly as a bundled one does.
-        if get_model_backend(self) is None:
-            self._model_backend = InterpEngineModelBackend()
         self._engine_model = _Seam.wrap_model(
             self.model,  # type: ignore[attr-defined]
             getattr(self, "tokenizer", None),
             self.interp_engine_cfg,
             model_id,
         )
+        # INTERPRETUNE'S HELPERS READ `module.model.tokenizer`, and this adapter is the first
+        # composition where `module.model` is the raw HuggingFace model rather than a wrapper.
+        # `get_module_dims` does `module.model.tokenizer.vocab_size`, which every other adapter satisfies
+        # because its wrapper carries one: TransformerLens' `HookedTransformer` and nnsight's
+        # `LanguageModel` both do.
+        #
+        # The engine model CANNOT take that slot. `EagerModel` is not an `nn.Module` -- its MRO is
+        # `[EagerModel, object]` -- so assigning it raises `cannot assign as child module`, unlike
+        # circuit-tracer's replacement models which are typed `nn.Module` precisely so they can. So the
+        # convention is met where it can be met: the model the module already owns carries the tokenizer
+        # it was loaded with.
+        #
+        # SOURCED FROM THE ENGINE MODEL, not from `self.tokenizer`, and that is measured rather than
+        # preferred. In a real `ITSession` the module carries NO tokenizer at this point: it lives on the
+        # datamodule, and `self.tokenizer` is None when this hook runs. `EagerModel` resolves its own from
+        # the model id, so after the wrap there is exactly one tokenizer in scope that is guaranteed to
+        # exist and to be the one the engine will actually use.
+        #
+        # Attaching rather than replacing, and only when absent, so a composition whose model already
+        # satisfies the convention is left alone.
+        # ATTACHED AFTER THE WRAP, and the order is load-bearing now rather than incidental: the backend
+        # is constructed WITH the engine model, so it cannot be built before one exists. Constructing it
+        # first bound `engine_model=None` and every backend call fell through to the argument it was
+        # handed, which is the raw HuggingFace model -- reintroducing the exact defect this change fixes.
+        if get_model_backend(self) is None:
+            self._model_backend = InterpEngineModelBackend(engine_model=self._engine_model)
+
+        tokenizer = getattr(self._engine_model, "tokenizer", None)
+        if tokenizer is not None and getattr(self.model, "tokenizer", None) is None:  # type: ignore[attr-defined]
+            self.model.tokenizer = tokenizer  # type: ignore[attr-defined]
         return result
 
-    def engine_capture(self, tokens: Any, hook_names: list[str], detach: bool = True) -> Any:
-        """Capture at TransformerLens hook names, translated through the seam."""
+    def engine_capture(
+        self, tokens: Any, hook_names: list[str], detach: bool = True, attention_mask: Any = None
+    ) -> Any:
+        """Capture at TransformerLens hook names, translated through the seam.
+
+        ``attention_mask`` is optional here and NOT optional in effect: omitting it on a padded batch
+        runs the forward attending to pad positions, which is wrong by 44.7 on gpt2's ``resid_post``
+        without raising anything. Callers holding an interpretune batch should pass
+        ``batch["attention_mask"]``; a single prompt has nothing to pass.
+        """
         points = [_Seam.point_for(name, self.engine_model) for name in hook_names]
-        return _Seam.capture(self.engine_model, tokens, points, detach=detach)
+        return _Seam.capture(self.engine_model, tokens, points, detach=detach, attention_mask=attention_mask)
 
 
 class BaseInterpEngineModule(BaseITModule):
     """Base module for interp-engine compositions."""
 
 
-class InterpEngineModule(InterpEngineCaptureMixin, CoreHelperAttributes, BaseInterpEngineModule):
-    """The ``(core, interp_engine)`` module composition."""
+class InterpEngineModule(InterpEngineCaptureMixin, CoreAdapter, CoreHelperAttributes, BaseInterpEngineModule):
+    """The ``(core, interp_engine)`` module composition.
+
+    `CoreAdapter` IS PART OF A CORE COMPOSITION, and leaving it out is why this module could not complete
+    a runner step. It contributes `batch_to_device`, which the analysis runner calls on every batch, and
+    without it the composed module raised `AttributeError` from inside dataset generation -- surfacing as
+    a `DatasetGenerationError` that named neither the method nor this component.
+
+    TransformerLens does not inherit it because `TransformerLensAdapter` defines its own
+    `batch_to_device` for a converted model. interp-engine runs the HuggingFace model in place, so core's
+    implementation is the correct one rather than merely the available one, which is the same reason the
+    datamodule slot is plain `ITDataModule`.
+    """
+
+
+def _datamodule_classes(combination: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The datamodule composition for one adapter combination.
+
+    Lightning contributes its own datamodule base and the others do not, matching how the bundled
+    adapters register: `(ITDataModule,)` for a core composition, `(ITDataModule, LightningDataModule)`
+    for a Lightning one.
+
+    The Lightning import is LOCAL and deliberate. This entrypoint must import in an environment that
+    never installed Lightning -- the core compositions are the ones that have to work there -- so
+    reaching for it at module scope would make an optional dependency mandatory for compositions that
+    do not use it. Same reasoning as `_circuit_tracer_pairing`, and the same failure if ignored: an
+    import error at hub load rather than at registration.
+    """
+    from interpretune.base import ITDataModule
+
+    if Adapter.lightning not in combination:
+        return (ITDataModule,)
+
+    from interpretune.adapters.lightning import LightningDataModule
+
+    return (ITDataModule, LightningDataModule)
 
 
 #: Cache for the composed circuit-tracer pairing class. Built once, lazily, because constructing it
@@ -675,6 +1059,22 @@ def _circuit_tracer_pairing() -> Any:
 class InterpEngineModelBackend:
     """The engine as an interpretune ``ModelBackend``: required core plus ``INTERVENTION``.
 
+    CARRIES ITS ENGINE MODEL, because the one it is HANDED is the wrong object. Interpretune's ops call
+    ``backend.fwd(model=module.model, batch=batch)``, and every bundled adapter satisfies that because
+    `module.model` IS its wrapper -- a `HookedTransformer`, an nnsight `LanguageModel`, a circuit-tracer
+    `ReplacementModel`. This component cannot use that convention: `EagerModel` is not an `nn.Module`, so
+    assigning it to `module.model` raises `cannot assign as child module`.
+
+    Handed the raw HuggingFace model instead, interp-engine falls back to its PROTOCOL arm and refuses
+    with "takes one prompt at a time on the GPT2LMHeadModel backend" -- a message about batching that is
+    really a message about being given the wrong model. That symptom cost an hour of chasing a batching
+    limitation this component does not have.
+
+    So the backend is constructed with the engine model in `post_auto_model_init` and uses it. The `model`
+    argument is not ignored so much as SATISFIED: `wrap_model` wraps in place, so the engine model and the
+    passed HF model are the same weights, and acting on the former is acting on the latter. This mirrors
+    circuit-tracer's `CT_MODEL_BACKEND_FACTORIES`, which are handed the module for the same reason.
+
     Interpretune's ``ModelBackend`` was decomposed into a required core and capability-gated method
     groups precisely so a component like this one can implement what it actually does and SAY so
     (interpretune R1, speediedan/interpretune#401). This implements:
@@ -692,6 +1092,17 @@ class InterpEngineModelBackend:
     imported at module level, since those are the framework this component extends rather than the
     dependency it insulates against.
     """
+
+    def __init__(self, engine_model: Any = None) -> None:
+        self._engine_model = engine_model
+
+    def _engine(self, model: Any) -> Any:
+        """The engine model to act on: the one this backend was built with, else the argument.
+
+        Falling back rather than requiring it keeps direct construction working for the tests that build a
+        backend without a module, and honours a caller who DOES pass an engine model.
+        """
+        return self._engine_model if self._engine_model is not None else model
 
     @property
     def capabilities(self) -> frozenset[Any]:
@@ -725,7 +1136,8 @@ class InterpEngineModelBackend:
     # -- ModelBackendCore ---------------------------------------------------------------------
 
     def fwd(self, model: Any, batch: dict[str, Any]) -> Any:
-        return _Seam.forward(model, _tokens_from_batch(batch))
+        tokens = _tokens_from_batch(batch)
+        return _Seam.forward(self._engine(model), tokens, attention_mask=_attention_mask_from_batch(batch))
 
     def fwd_w_cache(self, model: Any, batch: dict[str, Any], names_filter: Any) -> tuple[Any, Any]:
         """Forward with activation caching, at TransformerLens hook names.
@@ -734,9 +1146,11 @@ class InterpEngineModelBackend:
         address and REFUSES the ambiguous ones rather than guessing, which is the behaviour this
         adapter exists to get right.
         """
-        hook_names = _names_filter_to_list(names_filter)
-        points = [_Seam.point_for(name, model) for name in hook_names]
-        cache = _Seam.capture(model, _tokens_from_batch(batch), points)
+        engine = self._engine(model)
+        hook_names = _names_filter_to_list(names_filter, engine)
+        tokens = _tokens_from_batch(batch)
+        points = [_Seam.point_for(name, engine) for name in hook_names]
+        cache = _Seam.capture(engine, tokens, points, attention_mask=_attention_mask_from_batch(batch))
         by_hook = {name: cache[point] for name, point in zip(hook_names, points)}
         return _logits_of(cache), self.wrap_activation_cache(by_hook, model)
 
@@ -775,19 +1189,21 @@ class InterpEngineModelBackend:
         # so the scope has to travel beside the spec to reach the mask that expresses it.
         specs = [
             (
-                normalize_position_scope(getattr(spec, "position_scope", PositionScope.LAST_TOKEN)),
+                normalize_position_scope(_spec_field(spec, "position_scope", PositionScope.LAST_TOKEN)),
                 _Seam.steer_spec(
-                    vector=_require_expressible_operand(spec.intervention_tensor, point),
+                    vector=_require_expressible_operand(_spec_field(spec, "intervention_tensor"), point),
                     layer=layer,
-                    coeff=spec.scale_factor,
-                    method=_steer_method_for(getattr(spec, "mode", "replace")),
+                    coeff=_spec_field(spec, "scale_factor"),
+                    method=_steer_method_for(_spec_field(spec, "mode", "replace")),
                     point=point,
                 ),
             )
-            for layer, point, spec in _intervention_targets(interventions, model)
+            for layer, point, spec in _intervention_targets(interventions, self._engine(model))
         ]
-        pre = _Seam.forward(model, tokens)
-        post = _Seam.steer(model, tokens, specs)
+        engine = self._engine(model)
+        attention_mask = _attention_mask_from_batch(batch)
+        pre = _Seam.forward(engine, tokens, attention_mask=attention_mask)
+        post = _Seam.steer(engine, tokens, specs, attention_mask=attention_mask)
         return pre, post
 
 
@@ -871,5 +1287,28 @@ class InterpEngineAdapter:
                 component_key="module",
                 adapter_combination=combination,  # type: ignore[arg-type]
                 composition_classes=classes,
+                description=description,
+            )
+            # THE DATAMODULE SLOT, and its absence is why this component could not form a session.
+            #
+            # `ITSession` resolves a composition per COMPONENT KEY: it looks up `("datamodule", *adapters)`
+            # as well as `("module", *adapters)`. Registering only the module slot registers successfully,
+            # passes every test that builds a module directly, and fails at session construction with a
+            # KeyError naming the datamodule key -- which reads as a missing adapter rather than as a
+            # component that registered half of itself.
+            #
+            # Nothing in this adapter has been exercised through a real `ITSession` until now; the seam
+            # tests and the parity module both host the module class by hand, which is precisely the shape
+            # of test that cannot see this. Interpretune's conformance suite builds the session, so it
+            # found it on first contact.
+            #
+            # `ITDataModule` unchanged, because interp-engine changes how a forward is OBSERVED and not how
+            # data is prepared. That is the same answer the TransformerLens and circuit-tracer adapters
+            # give for the same reason, rather than a default taken for convenience.
+            adapter_ctx_registry.register(
+                ADAPTER_NAME,
+                component_key="datamodule",
+                adapter_combination=combination,  # type: ignore[arg-type]
+                composition_classes=_datamodule_classes(combination),
                 description=description,
             )

@@ -8,6 +8,9 @@ moving a signature turns THIS repo red rather than a framework nobody expects to
 
 from __future__ import annotations
 
+import contextlib
+import pathlib
+
 import pytest
 
 # INTERNALS COME FROM `.adapter`, NOT FROM THE PACKAGE, and the distinction is load-bearing rather than
@@ -91,10 +94,18 @@ requires_ct = pytest.mark.skipif(not _HAS_CT, reason="circuit-tracer not install
 
 
 def _names(registry):
-    """Composition keys as readable `a+b` strings, order-insensitive like the registry itself."""
+    """The distinct compositions registered, as readable `a+b` strings.
+
+    DEDUPLICATED, because a composition now occupies more than one component slot: the same adapter set
+    appears under both `module` and `datamodule`, and this helper answers "which compositions exist"
+    rather than "how many slots were registered". `test_every_composition_registers_both_component_slots`
+    is what asserts the slot pairing.
+    """
     return sorted(
-        "+".join(sorted(a.name if hasattr(a, "name") else str(a) for a in key[1:]))
-        for key in registry.available_compositions()
+        {
+            "+".join(sorted(a.name if hasattr(a, "name") else str(a) for a in key[1:]))
+            for key in registry.available_compositions()
+        }
     )
 
 
@@ -105,6 +116,79 @@ def _fresh_registry():
     return CompositionRegistry()
 
 
+@contextlib.contextmanager
+def _all_declared_satisfiable(declared):
+    """Present `declared` to the entrypoint as the rails' satisfiable set, then restore.
+
+    The entrypoint reads `supported_compositions()`, which is a ContextVar the rails set. Setting it here exercises the
+    HUB path rather than the direct-import path, which is the one that consumes the manifest at all -- the direct path
+    never sees it.
+    """
+    from interpretune.hub import adapters as hub_adapters
+
+    token = hub_adapters._SUPPORTED_COMPOSITIONS.set(tuple(sorted(declared)))
+    try:
+        yield
+    finally:
+        hub_adapters._SUPPORTED_COMPOSITIONS.reset(token)
+
+
+class TestTheManifestDeclaresWhatRegisters:
+    """The manifest and the code must agree on COMPONENT SLOTS, not only on adapter sets.
+
+    The rails check the other direction and deliberately stop short of this one. Their invariant walks
+    the satisfiable set and drops the component name (`wanted = set(entry_key[1:])`), so a manifest that
+    declares `module` while the code also registers `datamodule` loads perfectly. Nothing fails, and the
+    only visible consequence is the PUBLISHED CARD, which renders one row per declared entry: a reader
+    comparing components sees no datamodule and concludes this one has none.
+
+    That is the recurring shape in this repo -- correct locally, misleading globally, silent -- so the
+    agreement is asserted here, where it is this component's own business, rather than wished onto a
+    framework that has a considered reason not to check it. Overstating already fails at load; this is
+    the understating half.
+    """
+
+    def _declared_keys(self):
+        import yaml
+
+        manifest = yaml.safe_load(pathlib.Path("src/interp_engine_adapter/it_component.yaml").read_text())
+        return {
+            (str(entry["component"]), *sorted(str(a) for a in entry["adapters"]))
+            for entry in manifest["adapters"]["compositions"]
+        }
+
+    def test_every_declared_slot_is_registered_and_no_others(self):
+        declared = self._declared_keys()
+        registry = _fresh_registry()
+
+        # Every declared composition treated as satisfiable, which is what a fully equipped environment
+        # sees. The conditional entries are covered by the registration tests above under both outcomes.
+        import interp_engine_adapter.adapter as mod
+
+        if mod._circuit_tracer_pairing() is None:
+            declared = {k for k in declared if "circuit_tracer" not in k}
+
+        with _all_declared_satisfiable(declared):
+            InterpEngineAdapter.register_adapter_ctx(registry)
+
+        registered = {
+            (str(key[0]), *sorted(str(getattr(a, "value", a)) for a in key[1:]))
+            for key in registry.available_compositions()
+        }
+        assert registered == declared, (
+            f"manifest and registration disagree.\n  declared not registered: {sorted(declared - registered)}"
+            f"\n  registered not declared: {sorted(registered - declared)}"
+        )
+
+    def test_both_slots_are_declared_for_every_adapter_set(self):
+        """The specific asymmetry that was there: `module` declared, `datamodule` registered silently."""
+        by_adapters: dict[tuple[str, ...], set[str]] = {}
+        for component, *adapters in self._declared_keys():
+            by_adapters.setdefault(tuple(adapters), set()).add(component)
+        for adapters, slots in by_adapters.items():
+            assert slots == {"module", "datamodule"}, f"{'+'.join(adapters)} declares only {sorted(slots)}"
+
+
 class TestRegistration:
     def test_registers_the_unconditional_compositions(self):
         registry = _fresh_registry()
@@ -113,9 +197,34 @@ class TestRegistration:
         names = _names(registry)
         assert "core+interp_engine" in names
         assert "interp_engine+lightning" in names
+
+        # KEYED BY COMPONENT, because a composition is more than its module. This used to assert that
+        # every registered key mapped to `(InterpEngineModule,)`, which was true only while this component
+        # registered the module slot alone -- and registering only that half is exactly why it could not
+        # build an `ITSession`. The datamodule slot now exists, so the assertion has to say which slot it
+        # is talking about.
         for key in registry.available_compositions():
-            if "circuit_tracer" not in str(key):
+            if "circuit_tracer" in str(key):
+                continue
+            if key[0] == "module":
                 assert registry.get(key) == (InterpEngineModule,)
+            elif key[0] == "datamodule":
+                assert registry.get(key), f"{key} registered no datamodule classes"
+
+    def test_every_composition_registers_both_component_slots(self):
+        """A component that registers only the module half registers SUCCESSFULLY and fails later, at session
+        construction, with a KeyError naming the datamodule key.
+
+        That reads as a missing adapter rather than as a half-registered component, so the pairing is asserted here.
+        """
+        registry = _fresh_registry()
+        InterpEngineAdapter.register_adapter_ctx(registry)
+
+        by_adapters: dict[tuple, set[str]] = {}
+        for key in registry.available_compositions():
+            by_adapters.setdefault(key[1:], set()).add(key[0])
+        for adapters, slots in by_adapters.items():
+            assert {"module", "datamodule"} <= slots, f"{adapters} registers only {sorted(slots)}"
 
 
 class TestCompositionKeysMatchTheRails:
@@ -237,11 +346,21 @@ class TestManifestDeclaresTheConditionality:
 
         return yaml.safe_load((Path(mod.__file__).parent / "it_component.yaml").read_text())
 
-    def test_the_circuit_tracer_composition_declares_requires(self):
+    def test_every_circuit_tracer_slot_declares_requires(self):
+        """BOTH slots, and each independently.
+
+        A composition entry's identity is (component, *adapters), so the module and datamodule slots of
+        the conditional composition are two entries and the rails evaluate their `requires` separately.
+        Declaring it on one would make the other unconditionally satisfiable, and the entrypoint would
+        be handed a satisfiable datamodule slot for a composition whose module slot was skipped.
+        """
         entries = self._manifest()["adapters"]["compositions"]
         ct = [e for e in entries if "circuit_tracer" in e["adapters"]]
-        assert len(ct) == 1, "expected exactly one circuit-tracer composition"
-        assert ct[0].get("requires", {}).get("pip") == ["circuit-tracer"]
+        assert {e["component"] for e in ct} == {"module", "datamodule"}
+        for entry in ct:
+            assert entry.get("requires", {}).get("pip") == ["circuit-tracer"], (
+                f"the {entry['component']} slot does not declare its requirement"
+            )
 
     def test_the_core_compositions_declare_no_requires(self):
         """They must not, or an environment without circuit-tracer would get nothing at all."""
@@ -253,7 +372,11 @@ class TestManifestDeclaresTheConditionality:
     def test_every_declared_composition_is_one_the_code_can_register(self):
         """Manifest and code compared entry for entry, in the direction that catches drift: a manifest advertising
         something the code cannot produce is a promise to a reader that nothing will keep."""
-        declared = {("module", *sorted(e["adapters"])) for e in self._manifest()["adapters"]["compositions"]}
+        declared = {
+            ("module", *sorted(e["adapters"]))
+            for e in self._manifest()["adapters"]["compositions"]
+            if e["component"] == "module"
+        }
         known = {InterpEngineAdapter._composition_key(c) for c, _, _ in InterpEngineAdapter._COMPOSITIONS}
         assert declared == known, f"manifest and code disagree: {declared ^ known}"
 
@@ -437,12 +560,198 @@ class TestModelBackend:
         with pytest.raises(UnmappableHookError, match="does not support latent-model handles"):
             backend.fwd_w_intervention(None, {"input_ids": None}, {}, latent_model_handles=[object()])
 
-    def test_a_callable_names_filter_is_refused_rather_than_under_capturing(self):
+    def test_a_callable_names_filter_needs_a_model_it_can_enumerate(self):
+        """A callable is applied to an inventory, so a backend with no resolvable model has none.
+
+        This replaced a blanket refusal of callables. The refusal was written when the inventory could not be built at
+        all; it can be, from interpretune's own vocabulary, and refusing callables refused ORDINARY use rather than an
+        exotic one, because interpretune's core turns an explicit list into a predicate before it reaches a backend.
+        """
         from interp_engine_adapter.adapter import InterpEngineModelBackend, UnmappableHookError
 
         backend = InterpEngineModelBackend()
-        with pytest.raises(UnmappableHookError, match="callable names_filters"):
+        with pytest.raises(UnmappableHookError, match="no hook mapping"):
             backend.fwd_w_cache(None, {"input_ids": None}, lambda name: True)
+
+
+class _FakeEngineModel:
+    """The minimum an `EagerModel` has to look like for hook translation, and no more.
+
+    Deliberately a stub rather than a loaded gpt2. Everything under test here is NAME translation -- an
+    inventory, a predicate over it, and two alias tables -- which touches no weights, so loading a model
+    would buy a slower test and the same assertions. What it must carry is exactly what the translation
+    path reads: an `hf_model` whose CLASS NAME selects interpretune's architecture mapping, a config
+    depth to expand layers over, and a residual stream count, which is what
+    `interp_engine.mappers.has_hyper_connections` gates the block-input alias on. That function RAISES
+    rather than defaulting when it finds no count, so omitting `n_residual_streams` here would fail in a
+    way that reads like a mapper bug.
+    """
+
+    class _Config:
+        n_layer = 12
+
+    class GPT2LMHeadModel:  # -- the class NAME is the architecture key, not a style choice
+        config = None
+
+    n_residual_streams = 1
+
+    def __init__(self):
+        self.hf_model = self.GPT2LMHeadModel()
+        self.hf_model.config = self._Config()
+
+
+class TestTheHookInventoryIsInterpretunesVocabulary:
+    """A callable filter is a predicate over interpretune's names, so it must meet interpretune's names.
+
+    The measurement behind this class: enumerating FORWARD from the engine instead -- its points spelled
+    through `point_to_tlens_hook` -- produces 252 names on gpt2 and looks complete, but the engine's
+    reverse table holds one CANONICAL spelling per point while its forward table accepts aliases. So
+    `blocks.5.hook_resid_post` is in that inventory and `blocks.5.hook_out` is not, though both name the
+    same tensor and interpretune uses the second. A predicate over it matched NONE of the conformance
+    suite's five capture points, and nothing in the failure pointed at spelling.
+    """
+
+    def test_the_vocabulary_contains_the_alias_spellings_interpretune_uses(self):
+        from interp_engine_adapter.adapter import _hook_vocabulary
+
+        vocabulary = set(_hook_vocabulary(_FakeEngineModel()))
+        # Both spellings of the same tensor, which is the property a canonical-only inventory lacks.
+        assert "blocks.5.hook_out" in vocabulary
+        assert "blocks.5.hook_resid_post" in vocabulary
+        assert "unembed.hook_in" in vocabulary
+
+    def test_layer_scoped_hooks_are_expanded_and_global_ones_are_not(self):
+        """The bug this caught: `resolver.resolve` accepts names that name nothing.
+
+        The inventory was first built by trying every base name BOTH bare and layer-qualified and
+        keeping whichever forms the resolver accepted, to avoid reading a private attribute. It accepts
+        `blocks.5.unembed.hook_out` and a bare `attn.hook_z`. While interpretune's vocabulary was 13
+        base names that produced a little junk and no visible harm; at 34 it produced 252 junk entries
+        out of 433, and four of five ordinary filters started refusing because each selected some
+        nonsense name the seam then could not map.
+        """
+        from interp_engine_adapter.adapter import _hook_vocabulary
+
+        vocabulary = set(_hook_vocabulary(_FakeEngineModel()))
+
+        # Layer-scoped: qualified, never bare.
+        assert "blocks.5.attn.hook_z" in vocabulary
+        assert "attn.hook_z" not in vocabulary
+
+        # Global: bare, never qualified.
+        assert "unembed.hook_in" in vocabulary
+        assert "blocks.5.unembed.hook_in" not in vocabulary
+        assert not any(n.startswith("blocks.") and ".unembed." in n for n in vocabulary)
+
+    def test_the_refusal_summarises_by_base_name_rather_than_reciting_every_hook(self):
+        """An unreadable refusal is one that gets worked around instead of understood.
+
+        A broad predicate selects a hundred names here, so the message groups by the base name a predicate is actually
+        written against and carries the counts that let a caller decide what to do.
+        """
+        from interp_engine_adapter.adapter import UnmappableHookError, _names_filter_to_list
+
+        with pytest.raises(UnmappableHookError) as excinfo:
+            _names_filter_to_list(lambda name: name.endswith("hook_out"), _FakeEngineModel())
+
+        message = str(excinfo.value)
+        assert "ln1.hook_out" in message, "the message should name the base, not every layer of it"
+        assert "blocks.0.ln1.hook_out" not in message
+        assert message.count("ln1.hook_out") == 1
+        assert "explicit list" in message
+
+    def test_a_filter_matching_nothing_is_refused_rather_than_returning_an_empty_cache(self):
+        from interp_engine_adapter.adapter import UnmappableHookError, _names_filter_to_list
+
+        with pytest.raises(UnmappableHookError, match="matched none of"):
+            _names_filter_to_list(lambda name: name == "blocks.5.hook_nonexistent", _FakeEngineModel())
+
+    def test_a_filter_selecting_an_unmappable_name_is_refused_rather_than_captured_partially(self):
+        """Partial capture is the failure this whole path exists to avoid.
+
+        A cache holding the mappable subset is indistinguishable from a complete one at the call site, so the caller
+        computes over a filter that silently meant less than it said.
+        """
+        from interp_engine_adapter.adapter import UnmappableHookError, _names_filter_to_list
+
+        with pytest.raises(UnmappableHookError, match="cannot capture at"):
+            _names_filter_to_list(
+                lambda name: name.endswith("hook_mlp_out") or name.endswith("hook_attn_in"), _FakeEngineModel()
+            )
+
+
+class TestTheCircuitTracerGuardPropagatesOnlyOurOwnRefusals:
+    """The guard must forward this adapter's refusals and swallow everything else.
+
+    WHY THIS CLASS IS NOT GATED ON CIRCUIT-TRACER, unlike the pairing tests it protects. The guard's
+    contract is a property of `_Seam`, and `refuse_if_ambiguous` needs no circuit-tracer to exercise. It
+    was previously asserted only through `TestCircuitTracerPairing`, which IS gated, so the contract went
+    untested in every environment without circuit-tracer installed -- which is every environment except
+    the GPU lane.
+
+    A change that widened engine-gap errors into this adapter's own exception type therefore looked clean
+    everywhere it was measured, and broke `blocks.0.ln2.hook_normalized` on the one lane that runs the
+    pairing: a hook circuit-tracer resolves perfectly well, refused before it ever got there.
+    """
+
+    def test_a_name_the_engine_does_not_know_falls_through_to_circuit_tracer(self):
+        """`ln2.hook_normalized` is the exact name the GPU lane caught."""
+        from interp_engine_adapter.adapter import _Seam
+
+        for hook in ("ln2.hook_normalized", "ln1.hook_normalized", "hook_resid_post"):
+            _Seam.refuse_if_ambiguous(hook)  # must not raise
+
+    def test_this_adapters_own_refusal_still_propagates(self):
+        from interp_engine_adapter.adapter import UnmappableHookError, _Seam
+
+        for hook in ("hook_mlp_in", "hook_attn_in"):
+            with pytest.raises(UnmappableHookError, match="BEFORE the block norm"):
+                _Seam.refuse_if_ambiguous(hook)
+
+    def test_an_engine_gap_is_still_an_unmappable_hook_error_to_a_capture_caller(self):
+        """The distinction is for the guard alone; a capture path must refuse either way.
+
+        Subclassing is what buys both: the guard checks the narrow type, every other caller catches the
+        base and never learns there was a distinction.
+        """
+        from interp_engine_adapter.adapter import EngineHasNoPointError, UnmappableHookError
+
+        assert issubclass(EngineHasNoPointError, UnmappableHookError)
+
+
+class TestMeasuredAliasesAreNotTheRefusals:
+    """The two tables in `_Seam` look alike and mean opposite things.
+
+    `_REFUSED` names tensors that DIFFER and must not be substituted. `_MEASURED_ALIASES` names tensors
+    measured IDENTICAL that the engine simply has no spelling for. Conflating them in either direction
+    is a defect: mapping a refusal answers a question nobody asked, and refusing an alias makes the
+    backend unusable for names interpretune treats as fundamental.
+    """
+
+    def test_the_two_tables_do_not_overlap(self):
+        from interp_engine_adapter.adapter import _Seam
+
+        assert not set(_Seam._REFUSED) & set(_Seam._MEASURED_ALIASES)
+        assert not set(_Seam._REFUSED) & set(_Seam._MEASURED_GLOBAL_ALIASES)
+
+    def test_block_input_resolves_to_the_residual_stream_before_the_block(self):
+        from interp_engine_adapter.adapter import _Seam
+
+        address = _Seam.point_for("blocks.5.hook_in", _FakeEngineModel())
+        assert address.name == "resid_pre"
+        assert address.layer == 5
+
+    def test_unembed_input_resolves_to_the_final_norm(self):
+        from interp_engine_adapter.adapter import _Seam
+
+        assert _Seam.point_for("unembed.hook_in", _FakeEngineModel()).name == "final_norm"
+
+    def test_the_prenorm_refusal_is_still_a_refusal(self):
+        """The regression this repo exists to prevent: an alias table growing into the refusals."""
+        from interp_engine_adapter.adapter import UnmappableHookError, _Seam
+
+        with pytest.raises(UnmappableHookError, match="BEFORE the block norm"):
+            _Seam.point_for("blocks.5.hook_mlp_in", _FakeEngineModel())
 
 
 class TestInterventionTargetsAreModelAware:

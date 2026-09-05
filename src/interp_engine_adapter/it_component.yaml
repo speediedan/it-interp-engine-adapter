@@ -4,17 +4,33 @@ kinds: [adapters]
 adapters:
   entrypoint: adapter.py
   declares: [interp_engine]
+  # BOTH COMPONENT SLOTS PER COMPOSITION, because both are registered and an entry's identity is
+  # (component, *adapters) -- the component name is not decoration.
+  #
+  # This listed only the `module` slots until the datamodule registration landed, and NOTHING FAILED.
+  # The rails' registration invariant compares adapter SETS and drops the component name, so a manifest
+  # that understates its slots loads cleanly. The published card then renders every row as `module`, and
+  # a reader comparing components concludes this one supplies no datamodule. Overstating fails at load;
+  # understating is the direction nothing checks, which is the direction worth stating deliberately.
   compositions:
     - component: module
       adapters: [core, interp_engine]
+    - component: datamodule
+      adapters: [core, interp_engine]
     - component: module
       adapters: [lightning, interp_engine]
-    # CONDITIONAL, and the `requires` is what keeps this manifest honest. Without it the manifest
-    # would advertise three compositions to every reader while an environment without circuit-tracer
-    # yields two, with nothing saying so -- the declarative version of exactly the silent loss the
-    # rails' per-composition skip reporting exists to remove. The rails evaluate this and hand the
-    # entrypoint the satisfiable set; `register_adapter_ctx` registers that set and no more.
+    - component: datamodule
+      adapters: [lightning, interp_engine]
+    # CONDITIONAL, and the `requires` is what keeps this manifest honest. Without it the manifest would
+    # advertise six compositions to every reader while an environment without circuit-tracer yields
+    # four, with nothing saying so -- the declarative version of exactly the silent loss the rails'
+    # per-composition skip reporting exists to remove. The rails evaluate this and hand the entrypoint
+    # the satisfiable set; `register_adapter_ctx` registers that set and no more.
     - component: module
+      adapters: [core, interp_engine, circuit_tracer]
+      requires:
+        pip: ["circuit-tracer"]
+    - component: datamodule
       adapters: [core, interp_engine, circuit_tracer]
       requires:
         pip: ["circuit-tracer"]

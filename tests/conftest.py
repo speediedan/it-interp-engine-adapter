@@ -25,6 +25,15 @@ import os
 
 import pytest
 
+#: Interpretune's conformance suite ships as a pytest plugin, and a repository opts in by naming it.
+#: The suite owns case selection: it reads what the composed module's backends DECLARE at runtime and
+#: runs the cases for each declared surface, with a refusal case for each undeclared one, so declaring
+#: less is never a way to pass more. See `tests/test_conformance.py` for this repository's half.
+#:
+#: BELOW the imports rather than above them: `pytest_plugins` is read by pytest at collection and its
+#: position in the file is irrelevant to that, while putting it first makes every import here an E402.
+pytest_plugins = ["interpretune.testing.conformance.plugin"]
+
 
 def _cuda_available() -> bool:
     try:

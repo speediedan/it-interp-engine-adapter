@@ -129,7 +129,7 @@ jobs:
           # If a future interpretune reintroduces an undeclared import, this job fails at import rather
           # than being masked by a pin here, which is the outcome worth having.
           uv pip install -e ".[test]" \
-            "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
+            "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main"
           #
           # CIRCUIT-TRACER, DERIVED FROM INTERPRETUNE'S OWN PIN RATHER THAN RESTATED HERE.
           #

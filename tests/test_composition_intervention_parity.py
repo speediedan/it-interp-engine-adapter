@@ -137,10 +137,13 @@ def composition_class(staged_module):
     finally:
         hub_adapters._SUPPORTED_COMPOSITIONS.reset(token)
 
+    # FILTERED BY COMPONENT KEY, not by adapters alone. Once the datamodule slot existed, two keys
+    # matched this adapter set and `next()` could return the datamodule composition, so the "module
+    # class" under test became `ITDataModule` and every host built on it failed inside `nn.Module`.
     key = next(
         k
         for k in registry.available_compositions()
-        if sorted(getattr(a, "value", str(a)) for a in k[1:]) == ["core", "interp_engine"]
+        if k[0] == "module" and sorted(getattr(a, "value", str(a)) for a in k[1:]) == ["core", "interp_engine"]
     )
     return registry.get(key)[0]
 
