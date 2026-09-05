@@ -114,6 +114,16 @@ though both name the same tensor and interpretune uses the second. A predicate o
 inventory matched **none** of the conformance suite's five capture points, and nothing in the failure
 pointed at spelling.
 
+Which names carry a layer comes from `ComponentMap.block_components()` / `.global_components()`, and
+that is the second half of the same lesson. The first version avoided reading the resolver's private
+mapping by trying each base name bare AND layer-qualified and keeping whatever `resolver.resolve`
+accepted. `resolve` accepts `blocks.5.unembed.hook_out` and a bare `attn.hook_z`, so the inventory
+filled with names that name nothing: harmless at 13 base names, and at 34 (after
+speediedan/interpretune#453) it was 252 junk entries out of 433, which made four of five ordinary
+filters refuse. **Probing an API to see what it accepts measures its permissiveness, not the question
+you asked**, and the gap grows silently when the vocabulary does. Avoiding a private attribute was
+right; the fallback was not, and the public answer existed.
+
 ## Correctness lives here, not upstream
 
 Interpretune's core suite owns the **rails** (that the `adapters` kind loads, gates and registers,
