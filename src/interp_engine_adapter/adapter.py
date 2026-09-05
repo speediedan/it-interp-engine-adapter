@@ -83,6 +83,24 @@ class UnmappableHookError(ValueError):
     """A TransformerLens hook name has no honest counterpart among the engine's points."""
 
 
+class EngineHasNoPointError(UnmappableHookError):
+    """The ENGINE has no point for this name -- as distinct from this adapter refusing it.
+
+    A subclass, so every capture path that catches `UnmappableHookError` still refuses: from the caller's
+    seat "cannot capture here" is one outcome and the reason does not change what they can do.
+
+    It exists for the one place where the reason IS the whole question. `_Seam.refuse_if_ambiguous`
+    guards circuit-tracer's own resolver, and it must propagate only THIS adapter's refusals; a name the
+    engine merely does not know has to fall through to circuit-tracer, which may well resolve it. Before
+    this class existed the two were the same exception, so widening the message on engine gaps silently
+    converted "interp-engine has no point for `ln2.hook_normalized`" into "this adapter refuses
+    `ln2.hook_normalized`", and circuit-tracer stopped seeing a hook it resolves perfectly well.
+
+    That regression was invisible in every environment without circuit-tracer installed, which is every
+    environment except the GPU lane.
+    """
+
+
 class _Seam:
     """The one place this adapter touches ``interp_engine``.
 
@@ -152,6 +170,11 @@ class _Seam:
         """
         try:
             cls.point_for(f"blocks.0.{bare_hook}", None)
+        except EngineHasNoPointError:
+            # The engine not knowing a name is not this adapter's refusal, and circuit-tracer resolves
+            # names the engine has no point for -- `ln2.hook_normalized` among them. Ordered before the
+            # base class deliberately: it IS an `UnmappableHookError`, so the broad clause would catch it.
+            return
         except UnmappableHookError:
             raise
         except Exception:
@@ -206,7 +229,10 @@ class _Seam:
             # The engine's own text, given this adapter's voice. A caller who reaches here is holding an
             # interpretune hook name and needs to know what THIS component can do with it; the engine's
             # message lists ITS point vocabulary, which is not the vocabulary the caller wrote in.
-            raise UnmappableHookError(
+            #
+            # `EngineHasNoPointError`, NOT a bare `UnmappableHookError`: see that class. Capture paths
+            # treat them alike; the circuit-tracer guard must not.
+            raise EngineHasNoPointError(
                 f"{hook_name!r} is a hook name interpretune recognises and this backend cannot capture "
                 f"at: interp-engine's mapper has no point for it ({exc}). Ask for a name this backend "
                 "maps, or capture through a backend that covers it. Not resolved to a nearby point: the "

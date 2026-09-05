@@ -680,6 +680,45 @@ class TestTheHookInventoryIsInterpretunesVocabulary:
             )
 
 
+class TestTheCircuitTracerGuardPropagatesOnlyOurOwnRefusals:
+    """The guard must forward this adapter's refusals and swallow everything else.
+
+    WHY THIS CLASS IS NOT GATED ON CIRCUIT-TRACER, unlike the pairing tests it protects. The guard's
+    contract is a property of `_Seam`, and `refuse_if_ambiguous` needs no circuit-tracer to exercise. It
+    was previously asserted only through `TestCircuitTracerPairing`, which IS gated, so the contract went
+    untested in every environment without circuit-tracer installed -- which is every environment except
+    the GPU lane.
+
+    A change that widened engine-gap errors into this adapter's own exception type therefore looked clean
+    everywhere it was measured, and broke `blocks.0.ln2.hook_normalized` on the one lane that runs the
+    pairing: a hook circuit-tracer resolves perfectly well, refused before it ever got there.
+    """
+
+    def test_a_name_the_engine_does_not_know_falls_through_to_circuit_tracer(self):
+        """`ln2.hook_normalized` is the exact name the GPU lane caught."""
+        from interp_engine_adapter.adapter import _Seam
+
+        for hook in ("ln2.hook_normalized", "ln1.hook_normalized", "hook_resid_post"):
+            _Seam.refuse_if_ambiguous(hook)  # must not raise
+
+    def test_this_adapters_own_refusal_still_propagates(self):
+        from interp_engine_adapter.adapter import UnmappableHookError, _Seam
+
+        for hook in ("hook_mlp_in", "hook_attn_in"):
+            with pytest.raises(UnmappableHookError, match="BEFORE the block norm"):
+                _Seam.refuse_if_ambiguous(hook)
+
+    def test_an_engine_gap_is_still_an_unmappable_hook_error_to_a_capture_caller(self):
+        """The distinction is for the guard alone; a capture path must refuse either way.
+
+        Subclassing is what buys both: the guard checks the narrow type, every other caller catches the
+        base and never learns there was a distinction.
+        """
+        from interp_engine_adapter.adapter import EngineHasNoPointError, UnmappableHookError
+
+        assert issubclass(EngineHasNoPointError, UnmappableHookError)
+
+
 class TestMeasuredAliasesAreNotTheRefusals:
     """The two tables in `_Seam` look alike and mean opposite things.
 
