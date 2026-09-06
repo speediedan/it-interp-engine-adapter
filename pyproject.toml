@@ -43,6 +43,33 @@ test = [
 # `adapters.entrypoint` names, and a published repo carrying `adapter.py` reads better than one carrying
 # `__init__.py`. `__init__.py` re-exports it for the pip path and the loader never executes it, which is
 # why that file may import a sibling while the entrypoint may not.
+# THE NOTEBOOK PUBLISHING CONTRACT, consumed by `interpretune-publish-notebooks` and by
+# `NotebookFormConformance` in this repo's suite. Adapter-level examples are a standard rather than a
+# nicety: an adapter whose delivery mechanism is the hub needs one artifact that exercises the hub path
+# end to end, because every other test here reaches the component through pip or a staged tree.
+#
+# `colab_repo` is THIS repository, not interpretune's. The badge case asserts the badge opens
+# `github/<colab_repo>/blob/<colab_branch>/`, so the default would silently send a reader to a notebook
+# that does not exist in interpretune's tree.
+[tool.interpretune.notebooks]
+dev_dir = "examples/notebooks/dev"
+publish_dir = "examples/notebooks/publish"
+colab_repo = "speediedan/it-interp-engine-adapter"
+colab_branch = "main"
+# The install cell installs interpretune and the ENGINE, and deliberately not this adapter: the notebook
+# demonstrates loading the component from the hub, which is the thing worth showing and the thing
+# `forbidden_imports` enforces. Commented out by default, matching interpretune's own convention, so a
+# reader with a working environment is not made to reinstall it.
+install_cell = [
+    "# Uncomment to install into a fresh environment (Colab). A development install needs none of this.\n",
+    "# %pip install uv\n",
+    "# %uv pip install 'interpretune @ git+https://github.com/speediedan/interpretune.git@main'\n",
+    "# %uv pip install 'interp-engine~=1.5.1'\n",
+    "#\n",
+    "# This adapter is NOT installed: the notebook loads it from the Hub, which is the path it exists to\n",
+    "# demonstrate. `it.hub.pull` fetches it and `load_hub_adapter` executes it behind the trust gate.\n",
+]
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 packages = ["interp_engine_adapter"]
