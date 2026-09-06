@@ -102,15 +102,15 @@ jobs:
           python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
           echo "=== install ==="
           # NO pip BOOTSTRAP, and NO `--system`. Both were wrong in the first revision of this file and
-          # the image's own shape is why (measured on build 951, and confirmed against
+          # the image's own shape is why (measured on this pool's image, and confirmed against
           # interpretune's dockers/base-cuda/Dockerfile):
           #
           #   PATH        /tmp/venvs/it_dev/bin:...:/usr/local/bin
           #   VIRTUAL_ENV /tmp/venvs/it_dev
           #
           #   * The active interpreter is a `uv venv`, and uv does not put pip in one. So
-          #     `python -m pip ...` fails with "No module named pip" before doing anything -- which is
-          #     exactly how build 951 died.
+          #     `python -m pip ...` fails with "No module named pip" before doing anything, which is
+          #     exactly how the first run of this pipeline died.
           #   * `uv` is already installed system-wide at /usr/local/bin by the image, so there is
           #     nothing to bootstrap.
           #   * `uv pip install --system` would target /usr/lib/python3.13/site-packages, but the CUDA

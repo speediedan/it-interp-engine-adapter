@@ -45,10 +45,10 @@ payloads the manifest declares -- the adapters entrypoint among them -- pinned t
 Loading still never downloads, and the error above remains the refusal for a genuinely partial snapshot.
 
 **Delete the middle step and this whole note when `requires.interpretune` in `it_component.yaml` is
-raised to a version containing #459** (tracked as #18). Note which gate that is, because the two differ
+raised to a version containing speediedan/interpretune#459** (tracked as #18). Note which gate that is, because the two differ
 and only one governs this section: CI installs `interpretune[...] @ git+...@main` and so gets the fix the
 moment it merges, while a CONSUMER is admitted by the manifest floor, today `>=0.1.0.dev0`. This section
-is written for consumers, so CI going green on #459 is not the signal -- the workaround stays while the
+is written for consumers, so CI going green on speediedan/interpretune#459 is not the signal -- the workaround stays while the
 declared floor still admits an interpretune without the fix, and removing it depends on raising that
 floor, which is a compatibility decision rather than a doc edit.
 
