@@ -719,6 +719,47 @@ class TestTheCircuitTracerGuardPropagatesOnlyOurOwnRefusals:
         assert issubclass(EngineHasNoPointError, UnmappableHookError)
 
 
+class TestDeprecatedSpellingsStayNameable:
+    """A spelling interpretune deprecates but still resolves must stay in this backend's inventory.
+
+    speediedan/interpretune#463 made `parse(name, strict=True)` refuse deprecated aliases -- `attn.hook_z`
+    among them, which resolves leniently to the `attn.o` component. `_hook_vocabulary` parses LENIENTLY,
+    deliberately, and this pins that choice against a future tightening.
+
+    WHY LENIENT IS THE RIGHT DEFAULT HERE. The inventory answers "what could a caller name?", not "what
+    spelling would we recommend?". A caller whose predicate targets `attn.hook_z` is asking for a tensor
+    this backend can capture, and `point_for` resolves it correctly. Dropping it would make that
+    predicate match fewer names with nothing said -- which is the silent under-capture the whole
+    filter path exists to prevent, arriving through a style preference rather than a defect.
+
+    THE FAILURE THIS GUARDS. If interpretune later removes such an alias rather than deprecating it,
+    `point_for` starts refusing a name the inventory still offers. Every broad predicate that happens to
+    select it then fails as a partial selection, and the error names hook spellings rather than the
+    upstream change that caused it. Failing here instead names the spelling and this reasoning.
+    """
+
+    def test_a_deprecated_but_resolvable_spelling_is_offered_and_resolves(self):
+        from interp_engine_adapter.adapter import _Seam, _hook_vocabulary
+
+        model = _FakeEngineModel()
+        assert "blocks.5.attn.hook_z" in set(_hook_vocabulary(model))
+        assert _Seam.point_for("blocks.5.attn.hook_z", model).name == "z"
+
+    def test_the_inventory_parses_leniently_rather_than_strictly(self):
+        """Stated as a property of interpretune's parser, so a change upstream fails HERE by name."""
+        pytest.importorskip("interpretune.analysis.points")
+        from interpretune.analysis.points import parse
+
+        assert parse("attn.hook_z").component == "attn.o"
+        with pytest.raises(Exception) as excinfo:
+            parse("attn.hook_z", strict=True)
+        assert "Deprecated" in type(excinfo.value).__name__, (
+            f"expected a deprecation refusal under strict parsing, got {type(excinfo.value).__name__}. "
+            "If interpretune stopped deprecating this spelling, the lenient choice in `_hook_vocabulary` "
+            "may no longer be load-bearing and this test should be revisited rather than patched."
+        )
+
+
 class TestMeasuredAliasesAreNotTheRefusals:
     """The two tables in `_Seam` look alike and mean opposite things.
 
