@@ -37,15 +37,20 @@ load_hub_adapter(repo)                                                # executes
 ```
 
 Verified against the published revision, which then registers `interp_engine` and reproduces the seam's
-measurements. Until the fix below reaches a release this repo floors on, a reader following the one-line
-version gets an error naming the wrong problem.
+measurements. Until the condition below is met, a reader following the one-line version gets an error
+naming the wrong problem.
 
 **This is fixed in speediedan/interpretune#459**, which makes a key-less `it.hub.pull` materialize the
 payloads the manifest declares -- the adapters entrypoint among them -- pinned to the resolved commit.
 Loading still never downloads, and the error above remains the refusal for a genuinely partial snapshot.
-**Delete the middle step and this whole note once #459 is in a release this repo floors on**; the floor
-is `interpretune[conformance]`, so it arrives with the next one. Kept until then because consumers today
-run against released interpretune, where the three-step sequence is what works.
+
+**Delete the middle step and this whole note when `requires.interpretune` in `it_component.yaml` is
+raised to a version containing #459** (tracked as #18). Note which gate that is, because the two differ
+and only one governs this section: CI installs `interpretune[...] @ git+...@main` and so gets the fix the
+moment it merges, while a CONSUMER is admitted by the manifest floor, today `>=0.1.0.dev0`. This section
+is written for consumers, so CI going green on #459 is not the signal -- the workaround stays while the
+declared floor still admits an interpretune without the fix, and removing it depends on raising that
+floor, which is a compatibility decision rather than a doc edit.
 
 ## The entrypoint is executed as a single file, and that constrains everything
 
