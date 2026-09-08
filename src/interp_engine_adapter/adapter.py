@@ -1117,11 +1117,29 @@ class InterpEngineModelBackend:
         ``LAST_TOKEN`` would have been the easy answer and the wrong one -- it would refuse an operation
         this backend can perform exactly, which is the mirror image of silently narrowing one.
 
-        ONE mode, and the asymmetry is real rather than an omission. ``replace``, ``patch`` and
-        ``project`` all need the CURRENT activation, and the engine's additive steering primitive never
-        observes it. `_steer_method_for` refuses those three by name; this declaration is the same fact
-        stated ahead of the call, so the gate can refuse before reaching this backend at all.
+        ONE mode, and the asymmetry is real rather than an omission. The reason is NOT that the engine
+        cannot see the current activation, which an earlier version of this docstring claimed: two of its
+        three steering methods read it (``orthogonal`` and ``projection_cap`` both project the residual
+        onto the vector), and only ``additive`` does not. The reason is that the three are a closed set
+        of specific arithmetic forms rather than a general "compute a delta from h" hook, and none
+        computes what these modes need:
+
+        * ``project`` keeps the component PARALLEL to the vector where ``orthogonal`` keeps the
+          ORTHOGONAL one. Complementary projections, so no coefficient converts one into the other.
+        * ``patch`` needs targets measured during the forward, per token, while ``projection_cap``'s
+          bounds go through ``float()`` and so cannot vary by position.
+        * ``replace`` needs an arbitrary target, which no method computes.
+
+        Each is a missing OPERATION or a missing per-token PARAMETER, never a missing observation. The
+        distinction matters to a reader deciding whether some future engine release closes the gap:
+        activation-blindness would be fixed by a new hook, and these are fixed by new arithmetic.
+        `_steer_method_for` refuses all three by name; this declaration is the same fact stated ahead of
+        the call, so the gate can refuse before reaching this backend at all.
         """
+        # Derived from the mapping rather than restated, so the two cannot disagree. That also means a
+        # test comparing this declaration against the mapping compares the mapping to itself and can
+        # never fail; what actually needs asserting is that each declared mode STEERS, which is
+        # `TestEveryDeclaredModeCanActuallySteer` in the seam tests.
         return InterventionSupport(
             position_scopes=frozenset({PositionScope.LAST_TOKEN, PositionScope.ALL_POSITIONS}),
             modes=frozenset({InterventionMode(mode) for mode in _MODE_TO_STEER_METHOD}),
