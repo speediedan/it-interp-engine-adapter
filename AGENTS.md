@@ -277,6 +277,44 @@ device. It matters the moment one does. See the `gpu-lease` skill for planning a
 pre-commit run --all-files
 ```
 
+## Mathematical notation
+
+Write mathematics as LaTeX on every surface a reader sees: `docs/`, this file, docstrings, notebook
+markdown cells, and issue and PR bodies. `$\ell$`, `$W_{enc}$`, `$\lVert h \rVert$`, not `l`, `W_enc`,
+`||h||`. ASCII transliteration is ambiguous in ways the notation is not, and the ambiguity is silent: a
+reader cannot tell a subscript from a variable name, or an index from a norm, and nothing flags it.
+
+**Load the `cross-platform-latex` skill before writing or editing any of it.** Its rules are not
+stylistic. Each resolves a specific disagreement between GitHub's renderer and a Sphinx + MyST docs
+build, and the failure mode is the dangerous one: a formula that is correct in one place and quietly
+wrong in the other, rather than one that visibly fails. The four that catch people most often:
+
+- **`\lt` and `\gt`, never bare `<` and `>`.** GitHub encodes a raw `<` inside math twice, so the math
+  engine receives the literal string `&lt;` rather than the operator. MyST passes it through untouched,
+  so the docs build looks right while the README does not.
+- **No backslash before ASCII punctuation** (`\,` `\;` `\%` `\&`). GitHub reads these as CommonMark
+  escapes and drops the backslash, which does not merely lose a space: it changes the formula.
+  `\bar J_\ell\, h` arrives as `\bar J_\ell, h` and renders a stray comma, and `\%` becomes a bare `%`
+  that starts a LaTeX comment and swallows the rest of the line.
+- **`$$` on its own lines, and exactly two backslashes for a line break.** Four is the most common
+  advice on the subject, and it is a real fix for a parser that cannot render math at all; once the
+  target is configured, four is wrong everywhere.
+- **Do not press an opening `$` against a word character.** `layer-$\ell$` renders as plain text on
+  GitHub and as math in the docs build. A *trailing* hyphen is fine, which is what makes this easy to
+  miss: `$\gamma$-marked` works and `permuted-$\gamma$` does not.
+
+This repo has no Sphinx or MkDocs site, so every surface it publishes is GitHub, which needs no
+configuration and renders `$...$` natively. Write the portable form regardless: this repo's prose does
+not stay here. The component card is published to the Hub, and worked examples get excerpted into
+interpretune's MyST docs and its notebooks, where the rules above start to bite. Notation written for
+GitHub alone breaks silently at the moment it is moved, which is the moment nobody is checking it.
+
+```bash
+python .claude/skills/cross-platform-latex/scripts/check_math.py <files you touched>
+```
+
+The skill is vendored from a shared master and is not editable here; corrections go upstream.
+
 ## Repo conventions
 
 - **Pre-MVP: no backwards-compatibility shims.** Interpretune's internal contracts change without
