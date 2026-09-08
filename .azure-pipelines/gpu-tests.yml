@@ -168,6 +168,21 @@ jobs:
           print(entries[0])
           PY
           )
+          # RECORD WHAT WE ACTUALLY RESOLVED. This gate installs `interpretune @ main`, a MOVING
+          # reference, so its result is only meaningful against the interpretune commit that was `main`
+          # at install time -- and nothing else in the build captures that. Measured 2026-09-07: a gate
+          # here finished eight minutes before three interpretune PRs merged, and afterwards the only
+          # way to tell what it had validated was comparing timestamps against merge times.
+          #
+          # A recorded commit turns that inference into a lookup, and it is the whole cost of the fix.
+          python - <<'PY'
+          import json, importlib.metadata as md
+          try:
+              info = json.loads(md.distribution("interpretune").read_text("direct_url.json"))["vcs_info"]
+              print(f"RESOLVED interpretune: {info['commit_id']} (requested {info.get('requested_revision')})")
+          except Exception as exc:  # a non-VCS install has no direct_url; say so rather than fail the gate
+              print(f"RESOLVED interpretune: <no direct_url> ({type(exc).__name__}) version {md.version('interpretune')}")
+          PY
           echo "circuit-tracer, as interpretune pins it: ${CT_REQ}"
           uv pip install "${CT_REQ}"
           echo "=== resolved, and from WHERE (a version string would not show a second torch) ==="
