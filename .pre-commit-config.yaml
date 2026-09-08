@@ -8,6 +8,15 @@
 default_language_version:
   python: python3
 
+# .claude/skills: vendored copies of skills whose canonical form lives in speediedan/skills. Linting
+# them is not merely unnecessary, it is actively wrong three ways: the hooks REWRITE them (docformatter
+# and ruff reflow the bundled scripts, and blacken-docs rewrites python blocks inside the markdown),
+# which desyncs `.shared-skills.sha256` whose entire purpose is to assert the copies match the master;
+# the rewrite is discarded at the next sync, so the churn buys nothing; and this repo's docstring rules
+# would impose its authoring standards on a repo-neutral master shared with other consumers.
+# Corrections belong upstream, never to the vendored copy.
+exclude: '\.claude/skills/.*'
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -46,7 +55,12 @@ repos:
         name: Vendored skills are not edited here
         entry: python3 scripts/check_vendored_skills.py
         language: system
-        files: ^\.claude/skills/
+        # always_run rather than a `files:` trigger, because the repo-level `exclude:` above removes
+        # .claude/skills from every hook's file list -- which silently reduced this one to
+        # "(no files to check) Skipped", a pass indistinguishable from a real one. The check walks the
+        # manifest itself (pass_filenames: false), so it never needed a file list; the pattern was only
+        # ever a trigger, and a manifest validator that runs on every commit is the stronger contract.
+        always_run: true
         pass_filenames: false
         verbose: true
 
