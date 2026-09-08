@@ -41,6 +41,24 @@ jobs:
           # than being masked by a pin here, which is the outcome worth having.
           uv pip install --system --torch-backend=cpu -e ".[test]" \
             "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main"
+          # WHICH interpretune did this resolve? `@main` MOVES, so a green here is a statement about a
+          # commit nobody wrote down, and the gap is invisible until someone needs the answer. Measured:
+          # reconstructing it after the fact IS possible, because the setuptools-scm version string encodes
+          # the commit -- but only while the logs survive and only if someone thinks to look, which is a
+          # worse guarantee than one line of output.
+          #
+          # The `except` is not defensive padding. An EDITABLE install writes `dir_info` rather than
+          # `vcs_info`, so the lookup raises and, without this, a legitimate environment shape would fail
+          # the job over a diagnostic. Both paths were executed before this landed: the VCS path prints the
+          # full commit, and the fallback prints a version string that names the same commit independently.
+          python - <<'PY'
+          import json, importlib.metadata as md
+          try:
+              info = json.loads(md.distribution("interpretune").read_text("direct_url.json"))["vcs_info"]
+              print(f"RESOLVED interpretune: {info['commit_id']} (requested {info.get('requested_revision')})")
+          except Exception as exc:
+              print(f"RESOLVED interpretune: <no direct_url> ({type(exc).__name__}) version {md.version('interpretune')}")
+          PY
       - name: Test
         run: pytest -v
 
@@ -81,6 +99,16 @@ jobs:
             "interpretune @ git+https://github.com/speediedan/interpretune.git@main"
           echo "=== what landed (a short list is the point) ==="
           VIRTUAL_ENV=/tmp/cold uv pip list
+          # The cold leg resolves `@main` SEPARATELY from the `cpu` job, so it needs its own answer
+          # rather than inheriting one. `uv pip list` above prints a version, not a commit.
+          /tmp/cold/bin/python - <<'PY'
+          import json, importlib.metadata as md
+          try:
+              info = json.loads(md.distribution("interpretune").read_text("direct_url.json"))["vcs_info"]
+              print(f"RESOLVED interpretune: {info['commit_id']} (requested {info.get('requested_revision')})")
+          except Exception as exc:
+              print(f"RESOLVED interpretune: <no direct_url> ({type(exc).__name__}) version {md.version('interpretune')}")
+          PY
       - name: Bootstrap
         run: |
           /tmp/cold/bin/python - <<'PY'
