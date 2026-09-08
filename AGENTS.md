@@ -206,9 +206,17 @@ red is strong evidence the local env is the problem.
 
 ## CI
 
-`.github/workflows/ci.yml`, two jobs, and the shape is itself part of the reference pattern:
+`.github/workflows/ci.yml`, three jobs, and the shape is itself part of the reference pattern:
 
 - **`cpu`**: hosted runner, every push and PR. The gate that matters today.
+- **`cold-venv`**: hosted runner, every push and PR. THE BOOTSTRAP GATE, and it asks a different
+  question than `cpu` does. `cpu` installs `.[test]` and runs the suite, answering "do the tests
+  pass". This job installs ONLY what this component DECLARES into an empty venv (no `[test]`, no
+  `[conformance]`, and the asymmetry is deliberate because that extra is interpretune's test tooling)
+  and runs a bootstrap script rather than the suite, answering "can this component come up for someone
+  who has nothing". It asserts circuit-tracer is ABSENT before relying on its absence, so it cannot
+  quietly stop testing a cold environment. It is what found speediedan/interpretune#458 and
+  speediedan/interpretune#465, neither of which any green suite would have surfaced.
 - **`gpu`**: `workflow_dispatch` only, `runs-on: [self-hosted, gpu]`. Deliberately inert: it never
   runs and never blocks a merge unless a contributor registers a GPU runner. **There is no GitHub
   Actions self-hosted runner on the maintainer's host**, so this job does not exercise anything here
@@ -236,6 +244,15 @@ queues its own build for the same content. The `az-pipelines-ops` skill carries 
 
 Both workflows and the pipeline track `interpretune @ git+...@main` and install nothing else by hand;
 see Testing for why the two framework pins were removed.
+
+**Every lane prints which interpretune commit it actually resolved**, as `RESOLVED interpretune: <sha>
+(requested main)`. `@main` MOVES, so without that line a green is a statement about a commit nobody
+wrote down, and the gap is invisible until someone needs the answer. Recovering it afterwards IS
+possible, because the setuptools-scm version string encodes the commit, but only while the logs
+survive and only if the person looking thinks to derive it that way. Each lane carries its own copy
+rather than inheriting another's, because they resolve `@main` in separate installs and can
+legitimately land on different commits if `main` moves between them. An editable install has no
+`vcs_info` and falls back to the version string, which names the same commit by other means.
 
 ## GPU work must be wrapped by hand
 
