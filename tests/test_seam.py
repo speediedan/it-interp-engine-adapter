@@ -1153,3 +1153,106 @@ class TestCudaSelectionIsAdditive:
         # DEFAULT posture now means the marker's behaviour is pinned before anything depends on it,
         # rather than being discovered when the first device test lands.
         assert os.getenv("IT_RUN_CUDA_TESTS", "0") != "1"
+
+
+class TestEveryDeclaredModeCanActuallySteer:
+    """A positive control on the band: a mode this backend DECLARES must be able to change something.
+
+    `intervention_support` derives its modes from `_MODE_TO_STEER_METHOD`, so a test comparing the
+    declaration against the mapping compares the mapping to itself and cannot fail. What is not
+    definitional, and is what a caller actually depends on, is that a spec built through the real seam
+    produces a NON-ZERO delta for some residual. Two ways a declared mode can silently do nothing, both
+    measured against the engine rather than reasoned about:
+
+    * ``projection_cap`` clamps the projection into ``[min, max]`` and both bounds are independently
+      optional, so with neither the delta is zero for every input there is. ``steer_spec`` exposes no
+      parameter for a bound, so the moment that method becomes reachable through the mapping, every
+      clamp it builds is a no-op that completes and returns plausible logits.
+    * ``orthogonal`` at ``coeff=1.0`` rescales the projection by one, which is legitimately no change.
+
+    The second is why this sweeps coefficients and requires only that ONE of them steers: asserting the
+    default is non-zero would fail on arithmetic that is correct.
+    """
+
+    #: Projections chosen to sit above, below and inside a typical band, so a clamp that is merely
+    #: inactive on this data is not mistaken for one that can never act.
+    RESIDUALS = ((3.0, 4.0, 0.0), (-3.0, 4.0, 0.0), (0.5, 4.0, 0.0))
+    COEFFS = (0.0, 0.5, 2.0)
+
+    def test_each_declared_mode_produces_a_nonzero_delta_for_some_input(self):
+        import torch
+        from interp_engine import steer_delta
+
+        from interp_engine_adapter.adapter import _MODE_TO_STEER_METHOD, _Seam, _steer_method_for
+
+        vector = torch.tensor([1.0, 0.0, 0.0])
+        inert = []
+        for mode in sorted(_MODE_TO_STEER_METHOD):
+            method = _steer_method_for(mode)
+            steered = False
+            for coeff in self.COEFFS:
+                spec = _Seam.steer_spec(vector=vector, layer=0, coeff=coeff, method=method)
+                for row in self.RESIDUALS:
+                    delta = steer_delta(spec, torch.tensor([list(row)]), vector)
+                    if bool(torch.any(delta != 0)):
+                        steered = True
+                        break
+                if steered:
+                    break
+            if not steered:
+                inert.append(f"{mode!r} -> {method!r}")
+
+        assert not inert, (
+            "these declared intervention modes produce a zero delta for every coefficient and residual "
+            f"tried, so they steer nothing while being advertised as supported: {inert}. A mode whose "
+            "delta is unconditionally zero completes normally and returns plausible logits for an "
+            "intervention nobody performed. If this fired after adding a clamp mode, the cause is "
+            "`steer_spec` having no `min`/`max` parameter, so the `projection_cap` spec it builds has "
+            "no band to clamp into."
+        )
+
+
+class TestTheUnbandedClampIsRefused:
+    """The band refusal must FIRE, and must not fire on anything else.
+
+    A guard whose negative case never runs is the defect this fix exists to remove, reintroduced inside
+    its own repair, so proving the refusal happens is half of it. The other half is the complement: a
+    guard that refused every `projection_cap` spec, or every spec, would pass a test that only checked
+    the refusal. So the banded forms and the bandless-by-design methods are asserted to still build.
+    """
+
+    def test_projection_cap_with_neither_bound_is_refused_naming_what_is_missing(self):
+        import torch
+
+        from interp_engine_adapter.adapter import UnmappableHookError, _Seam
+
+        with pytest.raises(UnmappableHookError) as excinfo:
+            _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap")
+        message = str(excinfo.value)
+        assert "projection_cap" in message, "the refusal must name the mode it refused"
+        assert "minimum" in message and "maximum" in message, "it must name the parameters that would fix it"
+
+    @pytest.mark.parametrize(
+        "band", [{"minimum": 0.0}, {"maximum": 1.0}, {"minimum": 0.0, "maximum": 1.0}], ids=["min", "max", "both"]
+    )
+    def test_either_bound_alone_is_enough_to_build(self, band):
+        """A `min`-only clamp is inactive on data above the floor, which is correct and not this defect."""
+        import torch
+
+        from interp_engine_adapter.adapter import _Seam
+
+        spec = _Seam.steer_spec(
+            vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", **band
+        )
+        assert spec.min == band.get("minimum")
+        assert spec.max == band.get("maximum")
+
+    @pytest.mark.parametrize("method", ["additive", "orthogonal"])
+    def test_the_methods_that_take_no_band_are_not_refused(self, method):
+        """`additive` and `orthogonal` ignore min/max, so requiring a band from them would be wrong."""
+        import torch
+
+        from interp_engine_adapter.adapter import _Seam
+
+        spec = _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method=method)
+        assert spec.method == method

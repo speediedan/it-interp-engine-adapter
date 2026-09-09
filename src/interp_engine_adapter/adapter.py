@@ -326,12 +326,35 @@ class _Seam:
 
     @staticmethod
     def steer_spec(
-        vector: Any, layer: int, coeff: float = 1.0, method: str = "additive", point: str = "resid_post"
+        vector: Any,
+        layer: int,
+        coeff: float = 1.0,
+        method: str = "additive",
+        point: str = "resid_post",
+        minimum: float | None = None,
+        maximum: float | None = None,
     ) -> Any:
-        """Build one engine ``SteerSpec``."""
+        """Build one engine ``SteerSpec``.
+
+        ``minimum``/``maximum`` are the band for ``method="projection_cap"`` and are ignored by the
+        others, matching ``SteerSpec.min``/``.max``. They exist because without them this constructor
+        cannot express a working clamp at all: the delta is
+        ``(clamp(p, min, max) - p) * unit``, so a spec carrying neither bound collapses to zero for
+        every input rather than for the inputs that happen not to need clamping.
+        """
         from interp_engine import SteerSpec
 
-        return SteerSpec(vector=vector, layer=layer, coeff=coeff, method=method, point=point)
+        if method == "projection_cap" and minimum is None and maximum is None:
+            raise UnmappableHookError(
+                "method='projection_cap' was requested with neither a minimum nor a maximum, which is "
+                "not a clamp that does nothing on this data -- it is a clamp that can do nothing on any "
+                "data, since its delta is (clamp(p, min, max) - p) and with no band that is identically "
+                "zero. Refused rather than built: it would complete normally and return plausible logits "
+                "for an intervention nobody performed. Pass at least one bound."
+            )
+        return SteerSpec(
+            vector=vector, layer=layer, coeff=coeff, method=method, point=point, min=minimum, max=maximum
+        )
 
     @staticmethod
     def forward(engine_model: Any, tokens: Any, attention_mask: Any = None) -> Any:
@@ -1117,11 +1140,29 @@ class InterpEngineModelBackend:
         ``LAST_TOKEN`` would have been the easy answer and the wrong one -- it would refuse an operation
         this backend can perform exactly, which is the mirror image of silently narrowing one.
 
-        ONE mode, and the asymmetry is real rather than an omission. ``replace``, ``patch`` and
-        ``project`` all need the CURRENT activation, and the engine's additive steering primitive never
-        observes it. `_steer_method_for` refuses those three by name; this declaration is the same fact
-        stated ahead of the call, so the gate can refuse before reaching this backend at all.
+        ONE mode, and the asymmetry is real rather than an omission. The reason is NOT that the engine
+        cannot see the current activation, which an earlier version of this docstring claimed: two of its
+        three steering methods read it (``orthogonal`` and ``projection_cap`` both project the residual
+        onto the vector), and only ``additive`` does not. The reason is that the three are a closed set
+        of specific arithmetic forms rather than a general "compute a delta from h" hook, and none
+        computes what these modes need:
+
+        * ``project`` keeps the component PARALLEL to the vector where ``orthogonal`` keeps the
+          ORTHOGONAL one. Complementary projections, so no coefficient converts one into the other.
+        * ``patch`` needs targets measured during the forward, per token, while ``projection_cap``'s
+          bounds go through ``float()`` and so cannot vary by position.
+        * ``replace`` needs an arbitrary target, which no method computes.
+
+        Each is a missing OPERATION or a missing per-token PARAMETER, never a missing observation. The
+        distinction matters to a reader deciding whether some future engine release closes the gap:
+        activation-blindness would be fixed by a new hook, and these are fixed by new arithmetic.
+        `_steer_method_for` refuses all three by name; this declaration is the same fact stated ahead of
+        the call, so the gate can refuse before reaching this backend at all.
         """
+        # Derived from the mapping rather than restated, so the two cannot disagree. That also means a
+        # test comparing this declaration against the mapping compares the mapping to itself and can
+        # never fail; what actually needs asserting is that each declared mode STEERS, which is
+        # `TestEveryDeclaredModeCanActuallySteer` in the seam tests.
         return InterventionSupport(
             position_scopes=frozenset({PositionScope.LAST_TOKEN, PositionScope.ALL_POSITIONS}),
             modes=frozenset({InterventionMode(mode) for mode in _MODE_TO_STEER_METHOD}),
