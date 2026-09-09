@@ -8,6 +8,7 @@ moving a signature turns THIS repo red rather than a framework nobody expects to
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import pathlib
 
@@ -1328,3 +1329,70 @@ class TestTheUnbandedClampIsRefused:
 
         spec = _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method=method, coeff=coeff)
         assert spec.method == method
+
+
+def _adapter_module_path() -> str:
+    """The file the hub loader executes, located via the module under test rather than guessed."""
+    import interp_engine_adapter.adapter as _m
+
+    return _m.__file__
+
+
+class TestTheSeamIsTheOnlyPlaceTheEngineIsImported:
+    """`_Seam` documents itself as "The one place this adapter touches ``interp_engine``". Assert it.
+
+    The invariant was true when written and nothing enforced it, which matters more here than it would
+    for a stylistic rule: it is the reason this component's analysis-backend surface is hub-delivered
+    rather than in-tree. An invariant that decides a placement question and cannot fail is a decision
+    resting on an assumption nobody rechecks.
+
+    Parsed rather than grepped, deliberately. ``interp_engine_adapter`` has ``interp_engine`` as a
+    prefix, so a naive pattern matches this package's own imports and reports violations that are not
+    ones -- which happened while measuring this, and would have made the test either wrong or, worse,
+    permanently red for a reason unrelated to the invariant.
+    """
+
+    @staticmethod
+    def _engine_imports(tree):
+        """Every import of the ENGINE, as (node, module_name) pairs. Not the adapter package."""
+
+        def names_engine(name: str | None) -> bool:
+            # Exact module or a submodule of it. `interp_engine_adapter` is neither.
+            return name is not None and (name == "interp_engine" or name.startswith("interp_engine."))
+
+        found = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and names_engine(node.module):
+                found.append((node, node.module))
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if names_engine(alias.name):
+                        found.append((node, alias.name))
+        return found
+
+    def test_every_engine_import_in_the_package_is_inside_the_seam(self):
+        import ast as _ast
+
+        source = pathlib.Path(_adapter_module_path()).read_text()
+        tree = _ast.parse(source)
+
+        seam = next(
+            (n for n in tree.body if isinstance(n, _ast.ClassDef) and n.name == "_Seam"),
+            None,
+        )
+        assert seam is not None, "the _Seam class is gone; this test's subject no longer exists"
+        seam_lines = range(seam.lineno, (seam.end_lineno or seam.lineno) + 1)
+
+        engine_imports = self._engine_imports(tree)
+        assert engine_imports, (
+            "no interp_engine imports found at all, which means this test is passing vacuously rather "
+            "than because the invariant holds. Check the module path and the matcher."
+        )
+
+        outside = [f"line {n.lineno}: {mod}" for n, mod in engine_imports if n.lineno not in seam_lines]
+        assert not outside, (
+            "these interp_engine imports are outside `_Seam`, which documents itself as the one place "
+            f"this adapter touches the engine: {outside}. Either move them into the seam, or if the "
+            "invariant is being deliberately retired, change _Seam's docstring in the same commit so "
+            "the claim and the code do not disagree."
+        )
