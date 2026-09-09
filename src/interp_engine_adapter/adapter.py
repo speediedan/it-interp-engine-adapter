@@ -344,13 +344,36 @@ class _Seam:
         """
         from interp_engine import SteerSpec
 
-        if method == "projection_cap" and minimum is None and maximum is None:
+        # Refused because the request cannot be told apart from a parameter nobody set, and the result
+        # would be a forward that completes and returns plausible logits for an intervention nobody
+        # performed. Two other cases are deliberately NOT refused, and the boundaries matter:
+        #   * a spec that does nothing to THIS input but could to another -- a min-only clamp on data
+        #     already above the floor -- is a clamp working, and refusing it would be the mirror defect;
+        #   * a no-op the caller asked for EXPLICITLY, at a value that is not the default, is a request
+        #     rather than an omission. `additive` at coeff=0.0 is the instance, and it is required to
+        #     behave as an identity by the conformance suite.
+        # NOT every parameterization whose delta is zero. `additive` at coeff=0.0 is also identically
+        # zero, and is deliberately ALLOWED: 0.0 is never this signature's default, so it is always an
+        # explicit request, and the conformance contract requires a zero-scale intervention to be an
+        # IDENTITY rather than an error (`test_zero_intervention_is_identity`). Refusing it broke that
+        # suite, which is how this distinction was found.
+        #
+        # What is refused is the case where the no-op is indistinguishable from an OMISSION: a caller
+        # who never set the parameter and one who set it to the value that does nothing produce the
+        # same spec, so the intent cannot be recovered. That is `orthogonal` at the default coeff, and
+        # `projection_cap` with no band at all.
+        identity = None
+        if method == "orthogonal" and coeff == 1.0:
+            identity = "coeff=1.0, so the delta is (coeff-1)*projection, which is zero"
+        elif method == "projection_cap" and minimum is None and maximum is None:
+            identity = "neither a minimum nor a maximum, so the delta is (clamp(p) - p) with no clamp"
+        if identity is not None:
             raise UnmappableHookError(
-                "method='projection_cap' was requested with neither a minimum nor a maximum, which is "
-                "not a clamp that does nothing on this data -- it is a clamp that can do nothing on any "
-                "data, since its delta is (clamp(p, min, max) - p) and with no band that is identically "
-                "zero. Refused rather than built: it would complete normally and return plausible logits "
-                "for an intervention nobody performed. Pass at least one bound."
+                f"method={method!r} was requested with {identity}. That is not an intervention that "
+                "happens to do nothing to this input, which would be fine -- it can do nothing to any "
+                "input, so it would complete normally and return plausible logits for an intervention "
+                "nobody performed. Refused rather than built. Pass a coefficient that steers, or for "
+                "projection_cap at least one of minimum/maximum."
             )
         return SteerSpec(
             vector=vector, layer=layer, coeff=coeff, method=method, point=point, min=minimum, max=maximum
