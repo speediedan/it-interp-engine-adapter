@@ -1235,13 +1235,16 @@ class TestTheUnbandedClampIsRefused:
     #: The ONE parameterization per method whose delta is identically zero, with the value that produces
     #: it. They are at DIFFERENT values, which is the point: a single rule on `coeff` would be wrong for
     #: two of the three, and a reader who assumes the coefficient identities coincide has them backwards.
+    #: The parameterizations refused, and the property they share is NOT "the delta is zero". It is that
+    #: the no-op cannot be told apart from a parameter nobody set: `orthogonal`'s identity coefficient IS
+    #: this signature's default, and an absent band is an absent argument. `additive` at coeff=0.0 is
+    #: also identically zero and is deliberately absent from this list -- see the test below.
     IDENTITIES = [
-        ({"method": "additive", "coeff": 0.0}, "coeff=0.0"),
         ({"method": "orthogonal", "coeff": 1.0}, "coeff=1.0"),
         ({"method": "projection_cap"}, "minimum"),
     ]
 
-    @pytest.mark.parametrize("kwargs,expected_in_message", IDENTITIES, ids=["additive", "orthogonal", "projection_cap"])
+    @pytest.mark.parametrize("kwargs,expected_in_message", IDENTITIES, ids=["orthogonal", "projection_cap"])
     def test_every_identity_parameterization_is_refused_naming_the_value(self, kwargs, expected_in_message):
         """A spec that cannot steer ANY input is refused; the message names the mode and the value."""
         import torch
@@ -1253,6 +1256,22 @@ class TestTheUnbandedClampIsRefused:
         message = str(excinfo.value)
         assert kwargs["method"] in message, "the refusal must name the mode"
         assert expected_in_message in message, "it must name the value or parameter responsible"
+
+    def test_an_explicitly_requested_zero_is_built_rather_than_refused(self):
+        """`additive` at coeff=0.0 has a zero delta and is still allowed, deliberately.
+
+        0.0 is never this signature's default, so it is always an explicit request rather than an
+        omission, and the conformance contract requires a zero-scale intervention to be an IDENTITY
+        rather than an error (`test_zero_intervention_is_identity`). An earlier revision refused it on
+        the grounds that its delta is provably zero, which broke that suite; the property that actually
+        justifies a refusal is indistinguishability from an unset parameter, not zeroness.
+        """
+        import torch
+
+        from interp_engine_adapter.adapter import _Seam
+
+        spec = _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="additive", coeff=0.0)
+        assert spec.coeff == 0.0
 
     def test_a_spec_that_is_inert_on_this_input_but_not_all_is_built(self):
         """The complement that keeps the rule honest: `min`-only above the floor does nothing HERE.

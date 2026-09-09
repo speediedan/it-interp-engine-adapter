@@ -344,21 +344,26 @@ class _Seam:
         """
         from interp_engine import SteerSpec
 
-        # Every method has exactly ONE parameterization whose delta is identically zero, and they are at
-        # DIFFERENT values -- which is why this is a per-method table and not a single check on `coeff`.
-        # `additive`'s identity is coeff=0 (delta = coeff*v), `orthogonal`'s is coeff=1 (delta =
-        # (coeff-1)*p*v_hat, so one means "rescale the projection by one"), and `projection_cap`'s is an
-        # absent band (delta = (clamp(p,lo,hi) - p)*v_hat). A reader who assumes the two coefficient
-        # identities coincide gets one of them backwards.
+        # Refused because the request cannot be told apart from a parameter nobody set, and the result
+        # would be a forward that completes and returns plausible logits for an intervention nobody
+        # performed. Two other cases are deliberately NOT refused, and the boundaries matter:
+        #   * a spec that does nothing to THIS input but could to another -- a min-only clamp on data
+        #     already above the floor -- is a clamp working, and refusing it would be the mirror defect;
+        #   * a no-op the caller asked for EXPLICITLY, at a value that is not the default, is a request
+        #     rather than an omission. `additive` at coeff=0.0 is the instance, and it is required to
+        #     behave as an identity by the conformance suite.
+        # NOT every parameterization whose delta is zero. `additive` at coeff=0.0 is also identically
+        # zero, and is deliberately ALLOWED: 0.0 is never this signature's default, so it is always an
+        # explicit request, and the conformance contract requires a zero-scale intervention to be an
+        # IDENTITY rather than an error (`test_zero_intervention_is_identity`). Refusing it broke that
+        # suite, which is how this distinction was found.
         #
-        # These are refused rather than built because a spec that cannot steer ANY input is a caller
-        # mistake no downstream observation can reveal: the forward completes and returns plausible
-        # logits for an intervention nobody performed. A spec that merely does nothing to THIS input --
-        # a min-only clamp on data already above the floor -- is correct and is not refused.
+        # What is refused is the case where the no-op is indistinguishable from an OMISSION: a caller
+        # who never set the parameter and one who set it to the value that does nothing produce the
+        # same spec, so the intent cannot be recovered. That is `orthogonal` at the default coeff, and
+        # `projection_cap` with no band at all.
         identity = None
-        if method == "additive" and coeff == 0.0:
-            identity = "coeff=0.0, so the delta is 0*vector"
-        elif method == "orthogonal" and coeff == 1.0:
+        if method == "orthogonal" and coeff == 1.0:
             identity = "coeff=1.0, so the delta is (coeff-1)*projection, which is zero"
         elif method == "projection_cap" and minimum is None and maximum is None:
             identity = "neither a minimum nor a maximum, so the delta is (clamp(p) - p) with no clamp"
