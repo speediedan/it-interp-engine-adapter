@@ -464,7 +464,7 @@ class TestModelBackendIsAttachedNotOverridden:
         what is under test is the attach DECISION, which reads `__dict__` and calls the seam. A narrow
         double keeps the failure attributable to that decision rather than to session setup.
         """
-        from interp_engine_adapter.adapter import InterpEngineCaptureMixin
+        from interp_engine_adapter.adapter import InterpEngineConfig, InterpEngineCaptureMixin
 
         class _Rest:
             """Stands in for the rest of the MRO, which the mixin's `super()` call reaches."""
@@ -474,7 +474,11 @@ class TestModelBackendIsAttachedNotOverridden:
 
         class _Composed(InterpEngineCaptureMixin, _Rest):
             def __init__(self):
-                self.it_cfg = None
+                # Carries an engine config because a real module always does, and the adapter now refuses
+                # rather than defaulting when one did not reach it. The double was `it_cfg = None`, which
+                # no composed module ever is; the attach decision under test does not read the config, so
+                # supplying a faithful one narrows the double rather than widening it.
+                self.it_cfg = type("_Cfg", (), {"interp_engine_cfg": InterpEngineConfig()})()
                 self.model = object()
                 self.tokenizer = None
                 if existing is not None:
@@ -1442,4 +1446,53 @@ class TestTheEnginePinIsDeclaredOnceInEffect:
             f"{pip_pin!r} and the manifest declares {manifest_pin!r}. A pip consumer resolves the first "
             "and a hub consumer is gated on the second, so one path would admit an engine this "
             "component's seam was never validated against. Change both, in the same commit."
+        )
+
+
+class TestADroppedEngineConfigIsRefused:
+    """The engine config is refused when absent rather than replaced with a default.
+
+    The default this replaced was dead in this repo -- every consumer supplies a config -- so it could
+    only ever have fired when one failed to arrive, which is exactly when substituting one is wrong. The
+    settings it would have invented (backend, attention implementation, dtype) change what the engine
+    computes, and no downstream observation distinguishes an engine configured by the caller from one
+    configured by this fallback.
+
+    Both directions are asserted. A guard that refused every config would pass a refusal-only test, so
+    the complement checks that a supplied config is returned unchanged and by identity, not merely that
+    something non-None comes back.
+    """
+
+    @staticmethod
+    def _module_with_cfg(cfg_obj):
+        from interp_engine_adapter.adapter import InterpEngineAttributeMixin
+
+        class _Composed(InterpEngineAttributeMixin):
+            def __init__(self):
+                self.it_cfg = cfg_obj
+
+        return _Composed()
+
+    def test_a_config_that_did_not_arrive_is_refused_by_name(self):
+        module = self._module_with_cfg(type("_Cfg", (), {})())
+
+        with pytest.raises(ValueError) as excinfo:
+            _ = module.interp_engine_cfg
+
+        message = str(excinfo.value)
+        assert "interp_engine_cfg" in message, "the refusal must name the missing setting"
+        assert "default" in message, "it must say it declined to substitute a default, not merely that it is absent"
+        # The cause is the part a reader cannot reconstruct: auto-composition locates an adapter's config
+        # by import path, which does not resolve for a hub-delivered adapter.
+        assert "hub-delivered" in message, "it must name the mechanism that drops the config"
+
+    def test_a_supplied_config_is_returned_by_identity(self):
+        from interp_engine_adapter.adapter import InterpEngineConfig
+
+        supplied = InterpEngineConfig()
+        module = self._module_with_cfg(type("_Cfg", (), {"interp_engine_cfg": supplied})())
+
+        assert module.interp_engine_cfg is supplied, (
+            "a supplied config must be handed back unchanged; returning an equal-but-distinct object "
+            "would hide a substitution just as a default did"
         )
