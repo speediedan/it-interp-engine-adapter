@@ -887,8 +887,37 @@ class InterpEngineAttributeMixin:
 
     @property
     def interp_engine_cfg(self) -> InterpEngineConfig:
+        """This session's engine config, refusing rather than defaulting when it did not arrive.
+
+        The default this replaced was not a convenience, it was a mask. This property is read from
+        `post_auto_model_init`, so by the time it runs a composition declaring `interp_engine` is being
+        built and a config was expected; absence means one did not reach the module, not that the caller
+        declined to supply one.
+
+        And absence has a known cause worth naming in the message rather than leaving to be rediscovered.
+        Auto-composition finds an adapter's config class by importing `interpretune.adapters.<name>.config`
+        (`AUTOCOMP_SEARCH_TEMPLATES`), which cannot resolve for a hub-delivered adapter: its module is
+        executed from a cache under a revision-scoped synthetic name, so no import path follows from the
+        adapter name. `interpretune.config.shared` says discovery for those goes through a registry, and no
+        such lookup exists. So a settings object passed for this adapter through a composition's
+        constructor is dropped, and defaulting here turned that drop into plausible behaviour on an engine
+        the caller never asked for.
+        """
         cfg = getattr(self.it_cfg, "interp_engine_cfg", None)
-        return cfg if cfg is not None else InterpEngineConfig()
+        if cfg is None:
+            raise ValueError(
+                "no `interp_engine_cfg` reached this module, and this adapter will not run on a default "
+                "in its place: the settings it would silently substitute (backend, attention "
+                "implementation, dtype) change what the engine computes, and nothing downstream could "
+                "tell the difference. This module only exists inside a composition that declares "
+                "`interp_engine`, so a config was expected here.\n\n"
+                "The usual cause is that the composition's config class cannot carry it. Auto-composition "
+                "locates an adapter's config by import path, which does not resolve for a hub-delivered "
+                "adapter, so a value passed through the constructor is dropped rather than carried. Set "
+                "it on the module config the session is built from and confirm it survives to "
+                "`module.it_cfg.interp_engine_cfg`."
+            )
+        return cfg
 
     @property
     def engine_model(self) -> Any:
