@@ -1396,3 +1396,50 @@ class TestTheSeamIsTheOnlyPlaceTheEngineIsImported:
             "invariant is being deliberately retired, change _Seam's docstring in the same commit so "
             "the claim and the code do not disagree."
         )
+
+
+class TestTheEnginePinIsDeclaredOnceInEffect:
+    """The engine pin is written twice, and nothing asserted the two copies agree.
+
+    A pip consumer resolves `interp-engine` from `pyproject.toml`'s `dependencies`; a hub consumer is
+    gated by `requires.pip` in `it_component.yaml`. Both exist because the two paths are served by
+    different machinery, and neither is redundant.
+
+    But the manifest calls this pin "a correctness pin rather than caution" -- interp-engine's 1.x line
+    changes signatures between minors with no deprecation aliases, and the seam's contract tests assert
+    against the INSTALLED engine. So a drift between the two copies does not produce a version warning;
+    it produces one supported path admitting an engine the seam was never validated against, while the
+    other refuses it. Nothing downstream would say which copy was wrong.
+    """
+
+    @staticmethod
+    def _engine_requirement(specifiers: list[str]) -> str | None:
+        """The single `interp-engine` requirement in a list, or None. Not `interp-engine-something`."""
+        import re
+
+        matches = [s for s in specifiers if re.match(r"^\s*interp-engine\s*(?:[~=<>!]|$)", s)]
+        return matches[0].strip() if len(matches) == 1 else None
+
+    def test_the_pip_dependency_and_the_manifest_requirement_are_the_same_pin(self):
+        import tomllib
+
+        import yaml
+
+        root = pathlib.Path(_adapter_module_path()).resolve().parents[2]
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+        manifest = yaml.safe_load((root / "src" / "interp_engine_adapter" / "it_component.yaml").read_text())
+
+        pip_pin = self._engine_requirement(pyproject["project"]["dependencies"])
+        manifest_pin = self._engine_requirement(manifest["requires"]["pip"])
+
+        # Vacuity guard, not defensiveness: if a rename or restructure moves either declaration, the
+        # comparison below would pass on two Nones and this test would go green having checked nothing.
+        assert pip_pin is not None, "no single interp-engine requirement in pyproject [project].dependencies"
+        assert manifest_pin is not None, "no single interp-engine requirement in the manifest's requires.pip"
+
+        assert pip_pin == manifest_pin, (
+            f"the engine pin disagrees between the two paths that consume it: pyproject declares "
+            f"{pip_pin!r} and the manifest declares {manifest_pin!r}. A pip consumer resolves the first "
+            "and a hub consumer is gated on the second, so one path would admit an engine this "
+            "component's seam was never validated against. Change both, in the same commit."
+        )
