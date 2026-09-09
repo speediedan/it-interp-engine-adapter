@@ -1183,7 +1183,12 @@ class TestEveryDeclaredModeCanActuallySteer:
         import torch
         from interp_engine import steer_delta
 
-        from interp_engine_adapter.adapter import _MODE_TO_STEER_METHOD, _Seam, _steer_method_for
+        from interp_engine_adapter.adapter import (
+            _MODE_TO_STEER_METHOD,
+            _Seam,
+            _steer_method_for,
+            UnmappableHookError,
+        )
 
         vector = torch.tensor([1.0, 0.0, 0.0])
         inert = []
@@ -1191,7 +1196,13 @@ class TestEveryDeclaredModeCanActuallySteer:
             method = _steer_method_for(mode)
             steered = False
             for coeff in self.COEFFS:
-                spec = _Seam.steer_spec(vector=vector, layer=0, coeff=coeff, method=method)
+                try:
+                    spec = _Seam.steer_spec(vector=vector, layer=0, coeff=coeff, method=method)
+                except UnmappableHookError:
+                    # This coefficient is the method's identity and the seam refuses it at build time.
+                    # That IS the guard working, so it is not a failure here; keep looking for one that
+                    # steers. Without this the sweep would report a correctly-guarded seam as inert.
+                    continue
                 for row in self.RESIDUALS:
                     delta = steer_delta(spec, torch.tensor([list(row)]), vector)
                     if bool(torch.any(delta != 0)):
@@ -1221,6 +1232,43 @@ class TestTheUnbandedClampIsRefused:
     the refusal. So the banded forms and the bandless-by-design methods are asserted to still build.
     """
 
+    #: The ONE parameterization per method whose delta is identically zero, with the value that produces
+    #: it. They are at DIFFERENT values, which is the point: a single rule on `coeff` would be wrong for
+    #: two of the three, and a reader who assumes the coefficient identities coincide has them backwards.
+    IDENTITIES = [
+        ({"method": "additive", "coeff": 0.0}, "coeff=0.0"),
+        ({"method": "orthogonal", "coeff": 1.0}, "coeff=1.0"),
+        ({"method": "projection_cap"}, "minimum"),
+    ]
+
+    @pytest.mark.parametrize("kwargs,expected_in_message", IDENTITIES, ids=["additive", "orthogonal", "projection_cap"])
+    def test_every_identity_parameterization_is_refused_naming_the_value(self, kwargs, expected_in_message):
+        """A spec that cannot steer ANY input is refused; the message names the mode and the value."""
+        import torch
+
+        from interp_engine_adapter.adapter import UnmappableHookError, _Seam
+
+        with pytest.raises(UnmappableHookError) as excinfo:
+            _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, **kwargs)
+        message = str(excinfo.value)
+        assert kwargs["method"] in message, "the refusal must name the mode"
+        assert expected_in_message in message, "it must name the value or parameter responsible"
+
+    def test_a_spec_that_is_inert_on_this_input_but_not_all_is_built(self):
+        """The complement that keeps the rule honest: `min`-only above the floor does nothing HERE.
+
+        That is a correct clamp on data that needs none, and refusing it would be the mirror-image
+        defect -- refusing an operation the backend performs exactly.
+        """
+        import torch
+
+        from interp_engine_adapter.adapter import _Seam
+
+        spec = _Seam.steer_spec(
+            vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", minimum=0.0
+        )
+        assert spec.min == 0.0
+
     def test_projection_cap_with_neither_bound_is_refused_naming_what_is_missing(self):
         import torch
 
@@ -1247,12 +1295,17 @@ class TestTheUnbandedClampIsRefused:
         assert spec.min == band.get("minimum")
         assert spec.max == band.get("maximum")
 
-    @pytest.mark.parametrize("method", ["additive", "orthogonal"])
-    def test_the_methods_that_take_no_band_are_not_refused(self, method):
-        """`additive` and `orthogonal` ignore min/max, so requiring a band from them would be wrong."""
+    @pytest.mark.parametrize("method,coeff", [("additive", 1.0), ("orthogonal", 2.0)], ids=["additive", "orthogonal"])
+    def test_the_methods_that_take_no_band_are_not_refused(self, method, coeff):
+        """`additive` and `orthogonal` ignore min/max, so requiring a band from them would be wrong.
+
+        Each is given a coefficient that steers, because the identity values are refused separately and
+        for a different reason: this asserts the BAND rule does not overreach, not that every parameter
+        is accepted.
+        """
         import torch
 
         from interp_engine_adapter.adapter import _Seam
 
-        spec = _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method=method)
+        spec = _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method=method, coeff=coeff)
         assert spec.method == method

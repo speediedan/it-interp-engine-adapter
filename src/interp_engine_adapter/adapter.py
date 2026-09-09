@@ -344,13 +344,31 @@ class _Seam:
         """
         from interp_engine import SteerSpec
 
-        if method == "projection_cap" and minimum is None and maximum is None:
+        # Every method has exactly ONE parameterization whose delta is identically zero, and they are at
+        # DIFFERENT values -- which is why this is a per-method table and not a single check on `coeff`.
+        # `additive`'s identity is coeff=0 (delta = coeff*v), `orthogonal`'s is coeff=1 (delta =
+        # (coeff-1)*p*v_hat, so one means "rescale the projection by one"), and `projection_cap`'s is an
+        # absent band (delta = (clamp(p,lo,hi) - p)*v_hat). A reader who assumes the two coefficient
+        # identities coincide gets one of them backwards.
+        #
+        # These are refused rather than built because a spec that cannot steer ANY input is a caller
+        # mistake no downstream observation can reveal: the forward completes and returns plausible
+        # logits for an intervention nobody performed. A spec that merely does nothing to THIS input --
+        # a min-only clamp on data already above the floor -- is correct and is not refused.
+        identity = None
+        if method == "additive" and coeff == 0.0:
+            identity = "coeff=0.0, so the delta is 0*vector"
+        elif method == "orthogonal" and coeff == 1.0:
+            identity = "coeff=1.0, so the delta is (coeff-1)*projection, which is zero"
+        elif method == "projection_cap" and minimum is None and maximum is None:
+            identity = "neither a minimum nor a maximum, so the delta is (clamp(p) - p) with no clamp"
+        if identity is not None:
             raise UnmappableHookError(
-                "method='projection_cap' was requested with neither a minimum nor a maximum, which is "
-                "not a clamp that does nothing on this data -- it is a clamp that can do nothing on any "
-                "data, since its delta is (clamp(p, min, max) - p) and with no band that is identically "
-                "zero. Refused rather than built: it would complete normally and return plausible logits "
-                "for an intervention nobody performed. Pass at least one bound."
+                f"method={method!r} was requested with {identity}. That is not an intervention that "
+                "happens to do nothing to this input, which would be fine -- it can do nothing to any "
+                "input, so it would complete normally and return plausible logits for an intervention "
+                "nobody performed. Refused rather than built. Pass a coefficient that steers, or for "
+                "projection_cap at least one of minimum/maximum."
             )
         return SteerSpec(
             vector=vector, layer=layer, coeff=coeff, method=method, point=point, min=minimum, max=maximum
