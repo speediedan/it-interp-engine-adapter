@@ -1210,3 +1210,49 @@ class TestEveryDeclaredModeCanActuallySteer:
             "`steer_spec` having no `min`/`max` parameter, so the `projection_cap` spec it builds has "
             "no band to clamp into."
         )
+
+
+class TestTheUnbandedClampIsRefused:
+    """The band refusal must FIRE, and must not fire on anything else.
+
+    A guard whose negative case never runs is the defect this fix exists to remove, reintroduced inside
+    its own repair, so proving the refusal happens is half of it. The other half is the complement: a
+    guard that refused every `projection_cap` spec, or every spec, would pass a test that only checked
+    the refusal. So the banded forms and the bandless-by-design methods are asserted to still build.
+    """
+
+    def test_projection_cap_with_neither_bound_is_refused_naming_what_is_missing(self):
+        import torch
+
+        from interp_engine_adapter.adapter import UnmappableHookError, _Seam
+
+        with pytest.raises(UnmappableHookError) as excinfo:
+            _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap")
+        message = str(excinfo.value)
+        assert "projection_cap" in message, "the refusal must name the mode it refused"
+        assert "minimum" in message and "maximum" in message, "it must name the parameters that would fix it"
+
+    @pytest.mark.parametrize(
+        "band", [{"minimum": 0.0}, {"maximum": 1.0}, {"minimum": 0.0, "maximum": 1.0}], ids=["min", "max", "both"]
+    )
+    def test_either_bound_alone_is_enough_to_build(self, band):
+        """A `min`-only clamp is inactive on data above the floor, which is correct and not this defect."""
+        import torch
+
+        from interp_engine_adapter.adapter import _Seam
+
+        spec = _Seam.steer_spec(
+            vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", **band
+        )
+        assert spec.min == band.get("minimum")
+        assert spec.max == band.get("maximum")
+
+    @pytest.mark.parametrize("method", ["additive", "orthogonal"])
+    def test_the_methods_that_take_no_band_are_not_refused(self, method):
+        """`additive` and `orthogonal` ignore min/max, so requiring a band from them would be wrong."""
+        import torch
+
+        from interp_engine_adapter.adapter import _Seam
+
+        spec = _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method=method)
+        assert spec.method == method

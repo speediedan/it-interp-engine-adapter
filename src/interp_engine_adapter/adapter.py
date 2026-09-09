@@ -326,12 +326,35 @@ class _Seam:
 
     @staticmethod
     def steer_spec(
-        vector: Any, layer: int, coeff: float = 1.0, method: str = "additive", point: str = "resid_post"
+        vector: Any,
+        layer: int,
+        coeff: float = 1.0,
+        method: str = "additive",
+        point: str = "resid_post",
+        minimum: float | None = None,
+        maximum: float | None = None,
     ) -> Any:
-        """Build one engine ``SteerSpec``."""
+        """Build one engine ``SteerSpec``.
+
+        ``minimum``/``maximum`` are the band for ``method="projection_cap"`` and are ignored by the
+        others, matching ``SteerSpec.min``/``.max``. They exist because without them this constructor
+        cannot express a working clamp at all: the delta is
+        ``(clamp(p, min, max) - p) * unit``, so a spec carrying neither bound collapses to zero for
+        every input rather than for the inputs that happen not to need clamping.
+        """
         from interp_engine import SteerSpec
 
-        return SteerSpec(vector=vector, layer=layer, coeff=coeff, method=method, point=point)
+        if method == "projection_cap" and minimum is None and maximum is None:
+            raise UnmappableHookError(
+                "method='projection_cap' was requested with neither a minimum nor a maximum, which is "
+                "not a clamp that does nothing on this data -- it is a clamp that can do nothing on any "
+                "data, since its delta is (clamp(p, min, max) - p) and with no band that is identically "
+                "zero. Refused rather than built: it would complete normally and return plausible logits "
+                "for an intervention nobody performed. Pass at least one bound."
+            )
+        return SteerSpec(
+            vector=vector, layer=layer, coeff=coeff, method=method, point=point, min=minimum, max=maximum
+        )
 
     @staticmethod
     def forward(engine_model: Any, tokens: Any, attention_mask: Any = None) -> Any:
