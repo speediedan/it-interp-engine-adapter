@@ -111,9 +111,23 @@ class _Seam:
     """
 
     #: Bridge-style names that genuinely denote the sublayer's argument, i.e. the block norm's OUTPUT.
-    #: ``ln2.hook_out`` and ``mlp.hook_in`` are the same tensor (measured identical, cos 1.000000 on
-    #: gemma-3-1b-it layer 5), so both are accepted and mean the same point.
-    _SUBLAYER_INPUT_ALIASES = {"mlp.hook_in": "mlp_in", "ln2.hook_out": "mlp_in", "attn.hook_in": "attn_in"}
+    #: ``ln2.hook_out``/``mlp.hook_in`` and ``ln1.hook_out``/``attn.hook_in`` are each ONE tensor under two
+    #: spellings, measured identical at max|d| = 0.0 and cos 1.000000 on gpt2 layer 5 and on gemma-3-1b-it
+    #: layer 5 -- a pre-norm trunk and a sandwich-norm one, since that is the architecture where a naive
+    #: reading of a block norm's output stops being the sublayer's argument.
+    #:
+    #: BOTH spellings of a pair belong here, and the attn pair was half-populated for a while, so it is
+    #: worth saying why the missing half is not merely redundant. Interpretune's vocabulary canonicalizes
+    #: the two spellings to a single base, so a capture declaration derived by probing each spelling
+    #: independently answers one question two ways -- and at lookup the canonical spelling wins. Where
+    #: that is the refused one, the accepted spelling becomes unreachable rather than redundant, and the
+    #: declaration promises a point the capture path then refuses.
+    _SUBLAYER_INPUT_ALIASES = {
+        "mlp.hook_in": "mlp_in",
+        "ln2.hook_out": "mlp_in",
+        "attn.hook_in": "attn_in",
+        "ln1.hook_out": "attn_in",
+    }
 
     #: Block-level names interp-engine's mapper has no entry for, though the tensor they name is one
     #: the engine addresses under another name. NOT the same category as `_REFUSED` below, and keeping
@@ -1209,9 +1223,20 @@ class InterpEngineModelBackend:
                 "count; it was given None. This backend is constructible without a module for unit tests, "
                 "and this is the one method that cannot answer in that state."
             )
+        if self._engine_model is None:
+            raise ValueError(
+                "capture_support needs the EagerModel this backend wraps, and none is attached. Unlike the "
+                "seam's other methods it does NOT fall back to the HuggingFace model it was handed: the "
+                "engine's mapper reads architecture quirks off the EagerModel (sandwich norms, residual "
+                "stream count), and given a bare HF model it refuses every point that depends on them "
+                "rather than answering. The record would come back understating what this backend can "
+                "capture -- 7 of 30 base points on gpt2 rather than 11 -- and understating is the "
+                "direction no capture case catches, because an omitted point is neither captured nor "
+                "refused, only unknown."
+            )
         architecture = self._architecture_of(model)
         cmap = component_map_for(architecture)
-        engine = self._engine(model)
+        engine = self._engine_model
 
         capturable: set[str] = set()
         uncapturable: dict[str, str] = {}

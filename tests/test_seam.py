@@ -660,9 +660,14 @@ class TestTheHookInventoryIsInterpretunesVocabulary:
             _names_filter_to_list(lambda name: name.endswith("hook_out"), _FakeEngineModel())
 
         message = str(excinfo.value)
-        assert "ln1.hook_out" in message, "the message should name the base, not every layer of it"
-        assert "blocks.0.ln1.hook_out" not in message
-        assert message.count("ln1.hook_out") == 1
+        # The base has to satisfy two things this assertion cannot check for itself: the seam must still
+        # refuse it (`ln1.hook_out` stood here until it became a mapped alias of `attn.hook_in`), and its
+        # name must not be a substring of another refused base -- `embed.hook_out` occurs three times in
+        # this message only because `pos_embed.hook_out` contains it, which would make the count assertion
+        # below pass for the wrong reason.
+        assert "attn.o.hook_out" in message, "the message should name the base, not every layer of it"
+        assert "blocks.0.attn.o.hook_out" not in message
+        assert message.count("attn.o.hook_out") == 1
         assert "explicit list" in message
 
     def test_a_filter_matching_nothing_is_refused_rather_than_returning_an_empty_cache(self):
