@@ -1293,9 +1293,7 @@ class TestTheUnbandedClampIsRefused:
 
         from interp_engine_adapter.adapter import _Seam
 
-        spec = _Seam.steer_spec(
-            vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", minimum=0.0
-        )
+        spec = _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", minimum=0.0)
         assert spec.min == 0.0
 
     def test_projection_cap_with_neither_bound_is_refused_naming_what_is_missing(self):
@@ -1318,9 +1316,7 @@ class TestTheUnbandedClampIsRefused:
 
         from interp_engine_adapter.adapter import _Seam
 
-        spec = _Seam.steer_spec(
-            vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", **band
-        )
+        spec = _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", **band)
         assert spec.min == band.get("minimum")
         assert spec.max == band.get("maximum")
 
@@ -1363,7 +1359,10 @@ class TestTheSeamIsTheOnlyPlaceTheEngineIsImported:
 
     @staticmethod
     def _engine_imports(tree):
-        """Every import of the ENGINE, as (node, module_name) pairs. Not the adapter package."""
+        """Every import of the ENGINE, as (node, module_name) pairs.
+
+        Not the adapter package.
+        """
 
         def names_engine(name: str | None) -> bool:
             # Exact module or a submodule of it. `interp_engine_adapter` is neither.
@@ -1423,7 +1422,10 @@ class TestTheEnginePinIsDeclaredOnceInEffect:
 
     @staticmethod
     def _engine_requirement(specifiers: list[str]) -> str | None:
-        """The single `interp-engine` requirement in a list, or None. Not `interp-engine-something`."""
+        """The single `interp-engine` requirement in a list, or None.
+
+        Not `interp-engine-something`.
+        """
         import re
 
         matches = [s for s in specifiers if re.match(r"^\s*interp-engine\s*(?:[~=<>!]|$)", s)]
@@ -1457,15 +1459,13 @@ class TestTheEnginePinIsDeclaredOnceInEffect:
 class TestADroppedEngineConfigIsRefused:
     """The engine config is refused when absent rather than replaced with a default.
 
-    The default this replaced was dead in this repo -- every consumer supplies a config -- so it could
-    only ever have fired when one failed to arrive, which is exactly when substituting one is wrong. The
-    settings it would have invented (backend, attention implementation, dtype) change what the engine
-    computes, and no downstream observation distinguishes an engine configured by the caller from one
-    configured by this fallback.
+    The default this replaced was dead in this repo -- every consumer supplies a config -- so it could only ever have
+    fired when one failed to arrive, which is exactly when substituting one is wrong. The settings it would have
+    invented (backend, attention implementation, dtype) change what the engine computes, and no downstream observation
+    distinguishes an engine configured by the caller from one configured by this fallback.
 
-    Both directions are asserted. A guard that refused every config would pass a refusal-only test, so
-    the complement checks that a supplied config is returned unchanged and by identity, not merely that
-    something non-None comes back.
+    Both directions are asserted. A guard that refused every config would pass a refusal-only test, so the complement
+    checks that a supplied config is returned unchanged and by identity, not merely that something non-None comes back.
     """
 
     @staticmethod
