@@ -39,6 +39,7 @@ from interpretune.analysis.backends.interventions import normalize_position_scop
 from interpretune.analysis.ops.base import get_batch_input
 from interpretune.adapters.core import CoreAdapter
 from interpretune.base import CoreHelperAttributes, BaseITModule
+from interpretune.config.module import ITConfig
 from interpretune.protocol import Adapter
 
 
@@ -77,6 +78,24 @@ class InterpEngineConfig:
                 "Linux/CUDA-only and its request-correctness rules belong with the engine rather than "
                 "an adapter."
             )
+
+
+@dataclass(kw_only=True)
+class ITInterpEngineConfig(ITConfig):
+    """The composed module config for this adapter: an ``ITConfig`` that DECLARES ``interp_engine_cfg``.
+
+    Two config classes, as every bundled adapter has. :class:`InterpEngineConfig` above is the payload,
+    holding this adapter's settings; this one is the composed config a session's module actually
+    receives, and its job is to make ``interp_engine_cfg`` a real dataclass field.
+
+    That distinction is the whole point rather than a formality. Without a class declaring the field,
+    interpretune's auto-composition has nothing to compose: the setting is set on the seed config as a
+    stray attribute after construction and read back through a `getattr` default, so the module looks
+    configured while its config never was. A stray attribute also cannot be validated, serialized with
+    the config, or distinguished from a misspelling.
+    """
+
+    interp_engine_cfg: InterpEngineConfig = field(default_factory=InterpEngineConfig)
 
 
 class UnmappableHookError(ValueError):
@@ -1448,6 +1467,16 @@ class InterpEngineAdapter:
           invocation. That is a named case, not a fallback: nothing evaluated the conditionality, so this
           code answers the same question itself and registers what it knows it can support.
         """
+        # Register the composed config class BEFORE any composition, so a session constructing a config
+        # can find it. Nothing derives an import path to this module -- it executes under a synthetic
+        # name -- so this registration is the only way auto-composition can see the class.
+        try:
+            adapter_ctx_registry.register_module_cfg_class(ADAPTER_NAME, ITInterpEngineConfig)
+        except AttributeError:
+            # An interpretune predating registry-backed config discovery. The component still works;
+            # its settings compose the older way, which is what the version floor is for.
+            pass
+
         try:
             from interpretune.hub.adapters import supported_compositions
 
