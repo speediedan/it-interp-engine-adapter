@@ -375,9 +375,7 @@ class _Seam:
                 "nobody performed. Refused rather than built. Pass a coefficient that steers, or for "
                 "projection_cap at least one of minimum/maximum."
             )
-        return SteerSpec(
-            vector=vector, layer=layer, coeff=coeff, method=method, point=point, min=minimum, max=maximum
-        )
+        return SteerSpec(vector=vector, layer=layer, coeff=coeff, method=method, point=point, min=minimum, max=maximum)
 
     @staticmethod
     def forward(engine_model: Any, tokens: Any, attention_mask: Any = None) -> Any:
