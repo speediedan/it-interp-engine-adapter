@@ -183,6 +183,17 @@ jobs:
           python -m pip install --upgrade pip uv
           uv pip install --system -e ".[test]" \
             "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main"
+          # WHICH interpretune did this resolve? This leg resolves `@main` independently of the other
+          # jobs, and it is the slowest and most awkward to reproduce, so a failure here is the one most
+          # likely to be read months later from the log alone. A version string cannot answer it.
+          python - <<'PY'
+          import json, importlib.metadata as md
+          try:
+              info = json.loads(md.distribution("interpretune").read_text("direct_url.json"))["vcs_info"]
+              print(f"RESOLVED interpretune: {info['commit_id']} (requested {info.get('requested_revision')})")
+          except Exception as exc:
+              print(f"RESOLVED interpretune: <no direct_url> ({type(exc).__name__}) version {md.version('interpretune')}")
+          PY
       - name: Test (GPU)
         run: |
           nvidia-smi

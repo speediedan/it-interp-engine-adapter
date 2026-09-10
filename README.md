@@ -45,8 +45,9 @@ tensors share a cosine similarity of **0.088**, and published SAE dashboards hav
 the wrong one.
 
 So `seam.point_for()` maps `blocks.{i}.mlp.hook_in` and `blocks.{i}.ln2.hook_out` (which are the same
-tensor) to the engine's `mlp_in` point, and **refuses** the legacy `blocks.{i}.hook_mlp_in` with an
-error naming what to ask for instead. Silently substituting the tensor the caller probably meant is
+tensor) to the engine's `mlp_in` point, maps `blocks.{i}.attn.hook_in` and `blocks.{i}.ln1.hook_out`
+to `attn_in` for the same reason, and **refuses** the legacy `blocks.{i}.hook_mlp_in` with an error
+naming what to ask for instead. Silently substituting the tensor the caller probably meant is
 how this class of defect propagates, and this adapter declines to add to it.
 
 ## What this adapter declares, and what it refuses
@@ -57,7 +58,7 @@ says so and points here.
 
 ### Declared capabilities
 
-`INTERVENTION`, and nothing else. Not `LATENT_MODELS`: passing latent-model handles is **refused**
+`ACTIVATION_INTERVENTION`, and nothing else. Not `LATENT_MODELS`: passing latent-model handles is **refused**
 rather than ignored, because a result that looks like an intervention over latents and is not is worse
 than an error. Not `GRADIENTS`.
 

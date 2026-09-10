@@ -526,17 +526,17 @@ class TestModelBackend:
     """The backend claims exactly what it implements, and refuses what it does not."""
 
     def test_claims_intervention_and_nothing_else(self):
-        from interpretune.analysis.backends.capabilities import BackendCapability
+        from interpretune.analysis.backends.capabilities import ModelBackendCapability
         from interp_engine_adapter.adapter import InterpEngineModelBackend
 
         backend = InterpEngineModelBackend()
-        assert backend.supports(BackendCapability.INTERVENTION)
+        assert backend.supports(ModelBackendCapability.ACTIVATION_INTERVENTION)
         # Enumerated from the ENUM rather than a hand-written list. The previous version named
         # BATCHED_HOOKS explicitly and went stale the moment speediedan/interpretune#449 removed it,
         # which is the failure mode of pinning a vocabulary by transcription: the test breaks on a
         # change it was not written to have an opinion about. Deriving the complement means a member
         # added upstream is asserted absent automatically, and a member removed simply disappears.
-        for absent in set(BackendCapability) - {BackendCapability.INTERVENTION}:
+        for absent in set(ModelBackendCapability) - {ModelBackendCapability.ACTIVATION_INTERVENTION}:
             assert not backend.supports(absent), f"unexpectedly claims {absent}"
 
     def test_satisfies_core_and_intervention_protocols_only(self):
@@ -660,9 +660,14 @@ class TestTheHookInventoryIsInterpretunesVocabulary:
             _names_filter_to_list(lambda name: name.endswith("hook_out"), _FakeEngineModel())
 
         message = str(excinfo.value)
-        assert "ln1.hook_out" in message, "the message should name the base, not every layer of it"
-        assert "blocks.0.ln1.hook_out" not in message
-        assert message.count("ln1.hook_out") == 1
+        # The base has to satisfy two things this assertion cannot check for itself: the seam must still
+        # refuse it (`ln1.hook_out` stood here until it became a mapped alias of `attn.hook_in`), and its
+        # name must not be a substring of another refused base -- `embed.hook_out` occurs three times in
+        # this message only because `pos_embed.hook_out` contains it, which would make the count assertion
+        # below pass for the wrong reason.
+        assert "attn.o.hook_out" in message, "the message should name the base, not every layer of it"
+        assert "blocks.0.attn.o.hook_out" not in message
+        assert message.count("attn.o.hook_out") == 1
         assert "explicit list" in message
 
     def test_a_filter_matching_nothing_is_refused_rather_than_returning_an_empty_cache(self):
@@ -1288,9 +1293,7 @@ class TestTheUnbandedClampIsRefused:
 
         from interp_engine_adapter.adapter import _Seam
 
-        spec = _Seam.steer_spec(
-            vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", minimum=0.0
-        )
+        spec = _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", minimum=0.0)
         assert spec.min == 0.0
 
     def test_projection_cap_with_neither_bound_is_refused_naming_what_is_missing(self):
@@ -1313,9 +1316,7 @@ class TestTheUnbandedClampIsRefused:
 
         from interp_engine_adapter.adapter import _Seam
 
-        spec = _Seam.steer_spec(
-            vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", **band
-        )
+        spec = _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap", **band)
         assert spec.min == band.get("minimum")
         assert spec.max == band.get("maximum")
 
@@ -1358,7 +1359,10 @@ class TestTheSeamIsTheOnlyPlaceTheEngineIsImported:
 
     @staticmethod
     def _engine_imports(tree):
-        """Every import of the ENGINE, as (node, module_name) pairs. Not the adapter package."""
+        """Every import of the ENGINE, as (node, module_name) pairs.
+
+        Not the adapter package.
+        """
 
         def names_engine(name: str | None) -> bool:
             # Exact module or a submodule of it. `interp_engine_adapter` is neither.
@@ -1418,7 +1422,10 @@ class TestTheEnginePinIsDeclaredOnceInEffect:
 
     @staticmethod
     def _engine_requirement(specifiers: list[str]) -> str | None:
-        """The single `interp-engine` requirement in a list, or None. Not `interp-engine-something`."""
+        """The single `interp-engine` requirement in a list, or None.
+
+        Not `interp-engine-something`.
+        """
         import re
 
         matches = [s for s in specifiers if re.match(r"^\s*interp-engine\s*(?:[~=<>!]|$)", s)]
@@ -1452,15 +1459,13 @@ class TestTheEnginePinIsDeclaredOnceInEffect:
 class TestADroppedEngineConfigIsRefused:
     """The engine config is refused when absent rather than replaced with a default.
 
-    The default this replaced was dead in this repo -- every consumer supplies a config -- so it could
-    only ever have fired when one failed to arrive, which is exactly when substituting one is wrong. The
-    settings it would have invented (backend, attention implementation, dtype) change what the engine
-    computes, and no downstream observation distinguishes an engine configured by the caller from one
-    configured by this fallback.
+    The default this replaced was dead in this repo -- every consumer supplies a config -- so it could only ever have
+    fired when one failed to arrive, which is exactly when substituting one is wrong. The settings it would have
+    invented (backend, attention implementation, dtype) change what the engine computes, and no downstream observation
+    distinguishes an engine configured by the caller from one configured by this fallback.
 
-    Both directions are asserted. A guard that refused every config would pass a refusal-only test, so
-    the complement checks that a supplied config is returned unchanged and by identity, not merely that
-    something non-None comes back.
+    Both directions are asserted. A guard that refused every config would pass a refusal-only test, so the complement
+    checks that a supplied config is returned unchanged and by identity, not merely that something non-None comes back.
     """
 
     @staticmethod

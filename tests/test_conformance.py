@@ -60,6 +60,7 @@ from interpretune.testing.conformance import (  # noqa: E402
     ConformanceInputs,
     ConformanceTarget,
     ModelBackendConformance,
+    conformance_case,
 )
 
 COMPOSITION = ("core", "interp_engine")
@@ -141,3 +142,24 @@ class TestInterpEngineConformance(ModelBackendConformance):
         # last-position logits were wrong by 54.9 while nothing raised. A single-row target cannot see
         # that, because an unpadded batch has no mask to drop.
     )
+
+    # OVERRIDDEN ONLY TO MARK IT, and defined as a new function rather than marking the inherited one:
+    # `pytest.mark.xfail(...)(fn)` stores the mark ON the function object, so applying it to
+    # `ModelBackendConformance.test_supplied_settings_survive_composition` would mark the base for every
+    # other target that inherits it, interpretune's own included.
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "speediedan/interpretune#538: this component's two-way composition works by accident. The "
+            "conformance helper sets module_cfg_extras with setattr AFTER the seed config is built, so "
+            "`interp_engine_cfg` never reaches the constructor, which is where composition acts, and it "
+            "arrives as a stray attribute the adapter then reads back through a default. Not fixable on "
+            "this side: one adapter-side workaround builds on the warn-and-proceed branch #538 proposes to "
+            "turn into a refusal, and the other would leave `supplied_extras` empty, which makes this case "
+            "SKIP rather than pass. strict=True is the point of using a marker at all -- it fails on an "
+            "unexpected pass, so the marker cannot outlive the defect quietly once #538 lands."
+        ),
+    )
+    @conformance_case()
+    def test_supplied_settings_survive_composition(self, suite):
+        super().test_supplied_settings_survive_composition(suite)

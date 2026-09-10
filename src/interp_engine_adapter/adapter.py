@@ -29,7 +29,7 @@ from typing import Any
 
 from interpretune.adapters.registration import CompositionRegistry
 from interpretune.analysis.backends.capabilities import (
-    BackendCapability,
+    ModelBackendCapability,
     InterventionMode,
     InterventionSupport,
     PositionScope,
@@ -111,9 +111,23 @@ class _Seam:
     """
 
     #: Bridge-style names that genuinely denote the sublayer's argument, i.e. the block norm's OUTPUT.
-    #: ``ln2.hook_out`` and ``mlp.hook_in`` are the same tensor (measured identical, cos 1.000000 on
-    #: gemma-3-1b-it layer 5), so both are accepted and mean the same point.
-    _SUBLAYER_INPUT_ALIASES = {"mlp.hook_in": "mlp_in", "ln2.hook_out": "mlp_in", "attn.hook_in": "attn_in"}
+    #: ``ln2.hook_out``/``mlp.hook_in`` and ``ln1.hook_out``/``attn.hook_in`` are each ONE tensor under two
+    #: spellings, measured identical at max|d| = 0.0 and cos 1.000000 on gpt2 layer 5 and on gemma-3-1b-it
+    #: layer 5 -- a pre-norm trunk and a sandwich-norm one, since that is the architecture where a naive
+    #: reading of a block norm's output stops being the sublayer's argument.
+    #:
+    #: BOTH spellings of a pair belong here, and the attn pair was half-populated for a while, so it is
+    #: worth saying why the missing half is not merely redundant. Interpretune's vocabulary canonicalizes
+    #: the two spellings to a single base, so a capture declaration derived by probing each spelling
+    #: independently answers one question two ways -- and at lookup the canonical spelling wins. Where
+    #: that is the refused one, the accepted spelling becomes unreachable rather than redundant, and the
+    #: declaration promises a point the capture path then refuses.
+    _SUBLAYER_INPUT_ALIASES = {
+        "mlp.hook_in": "mlp_in",
+        "ln2.hook_out": "mlp_in",
+        "attn.hook_in": "attn_in",
+        "ln1.hook_out": "attn_in",
+    }
 
     #: Block-level names interp-engine's mapper has no entry for, though the tensor they name is one
     #: the engine addresses under another name. NOT the same category as `_REFUSED` below, and keeping
@@ -375,9 +389,7 @@ class _Seam:
                 "nobody performed. Refused rather than built. Pass a coefficient that steers, or for "
                 "projection_cap at least one of minimum/maximum."
             )
-        return SteerSpec(
-            vector=vector, layer=layer, coeff=coeff, method=method, point=point, min=minimum, max=maximum
-        )
+        return SteerSpec(vector=vector, layer=layer, coeff=coeff, method=method, point=point, min=minimum, max=maximum)
 
     @staticmethod
     def forward(engine_model: Any, tokens: Any, attention_mask: Any = None) -> Any:
@@ -1132,7 +1144,7 @@ def _circuit_tracer_pairing() -> Any:
 
 
 class InterpEngineModelBackend:
-    """The engine as an interpretune ``ModelBackend``: required core plus ``INTERVENTION``.
+    """The engine as an interpretune ``ModelBackend``: required core plus ``ACTIVATION_INTERVENTION``.
 
     CARRIES ITS ENGINE MODEL, because the one it is HANDED is the wrong object. Interpretune's ops call
     ``backend.fwd(model=module.model, batch=batch)``, and every bundled adapter satisfies that because
@@ -1181,11 +1193,94 @@ class InterpEngineModelBackend:
 
     @property
     def capabilities(self) -> frozenset[Any]:
-        return frozenset({BackendCapability.INTERVENTION})
+        return frozenset({ModelBackendCapability.ACTIVATION_INTERVENTION})
+
+    def capture_support(self, model: Any) -> Any:
+        """Which vocabulary points this backend can capture on ``model``, derived rather than declared.
+
+        Every base in the architecture's inventory is put through the seam's own resolver, and the split
+        is whatever it answers: resolved bases are capturable, refused ones carry the seam's refusal text
+        as their reason. Deriving it means the record cannot drift from what the adapter actually does --
+        a written-down list would be a second source of truth for a question the resolver already
+        answers, which is the shape this component has had to remove elsewhere.
+
+        The reasons are the `UnmappableHookError` messages verbatim rather than a summary. Those already
+        distinguish the two gaps this adapter is careful about: a name the engine's mapper has no entry
+        for, and a block-level name that is ambiguous across sandwich-norm architectures and is refused
+        rather than silently resolved to the wrong tensor.
+
+        Derived on every call and never cached. The record is instance-derived and interpretune re-queries
+        it after latent models are attached, so a cached answer would describe a model that has since
+        changed.
+        """
+        from interpretune.analysis.backends.capabilities import CaptureSupport
+        from interpretune.analysis.points import component_map_for
+        from interpretune.analysis.points.inventory import inventory, spelled_at
+
+        if model is None:
+            raise ValueError(
+                "capture_support needs the wrapped HuggingFace model to read its architecture and layer "
+                "count; it was given None. This backend is constructible without a module for unit tests, "
+                "and this is the one method that cannot answer in that state."
+            )
+        if self._engine_model is None:
+            raise ValueError(
+                "capture_support needs the EagerModel this backend wraps, and none is attached. Unlike the "
+                "seam's other methods it does NOT fall back to the HuggingFace model it was handed: the "
+                "engine's mapper reads architecture quirks off the EagerModel (sandwich norms, residual "
+                "stream count), and given a bare HF model it refuses every point that depends on them "
+                "rather than answering. The record would come back understating what this backend can "
+                "capture -- 7 of 30 base points on gpt2 rather than 11 -- and understating is the "
+                "direction no capture case catches, because an omitted point is neither captured nor "
+                "refused, only unknown."
+            )
+        architecture = self._architecture_of(model)
+        cmap = component_map_for(architecture)
+        engine = self._engine_model
+
+        capturable: set[str] = set()
+        uncapturable: dict[str, str] = {}
+        for base in inventory(cmap):
+            try:
+                _Seam.point_for(spelled_at(base, cmap), engine)
+                capturable.add(base)
+            except ValueError as exc:
+                uncapturable[base] = str(exc)
+
+        return CaptureSupport(
+            capturable=frozenset(capturable),
+            uncapturable=uncapturable,
+            n_layers=self._n_layers_of(model),
+            architecture=architecture,
+        )
+
+    @staticmethod
+    def _architecture_of(model: Any) -> str:
+        """The HF class name `component_map_for` keys on, from the model's own config."""
+        architectures = getattr(getattr(model, "config", None), "architectures", None)
+        if not architectures:
+            raise ValueError(
+                f"cannot read an architecture from {type(model).__name__}: its config declares no "
+                "`architectures`, and the component map is keyed by that HuggingFace class name."
+            )
+        return str(architectures[0])
+
+    @staticmethod
+    def _n_layers_of(model: Any) -> int:
+        """Layer count from the HF config, which is canonical where the engine's count could disagree."""
+        cfg = getattr(model, "config", None)
+        for attr in ("num_hidden_layers", "n_layer", "n_layers"):
+            value = getattr(cfg, attr, None)
+            if value is not None:
+                return int(value)
+        raise ValueError(
+            f"cannot read a layer count from {type(model).__name__}'s config (tried num_hidden_layers, "
+            "n_layer, n_layers); the capture record needs it to refuse a layer beyond the model."
+        )
 
     @property
     def intervention_support(self) -> InterventionSupport:
-        """Which configurations of ``INTERVENTION`` this backend honours.
+        """Which configurations of ``ACTIVATION_INTERVENTION`` this backend honours.
 
         BOTH scopes, because the engine expresses them one argument apart: ``position_mask`` excludes
         positions, so ``LAST_TOKEN`` is a mask and ``ALL_POSITIONS`` is its absence. Declaring only
@@ -1273,7 +1368,7 @@ class InterpEngineModelBackend:
         """
         if latent_model_handles:
             raise UnmappableHookError(
-                "this backend does not support latent-model handles (it claims INTERVENTION but not "
+                "this backend does not support latent-model handles (it claims ACTIVATION_INTERVENTION but not "
                 "LATENT_MODELS); attach latents through a backend that does, rather than having them "
                 "silently ignored here."
             )
