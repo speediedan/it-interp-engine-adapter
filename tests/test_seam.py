@@ -526,17 +526,17 @@ class TestModelBackend:
     """The backend claims exactly what it implements, and refuses what it does not."""
 
     def test_claims_intervention_and_nothing_else(self):
-        from interpretune.analysis.backends.capabilities import BackendCapability
+        from interpretune.analysis.backends.capabilities import ModelBackendCapability
         from interp_engine_adapter.adapter import InterpEngineModelBackend
 
         backend = InterpEngineModelBackend()
-        assert backend.supports(BackendCapability.INTERVENTION)
+        assert backend.supports(ModelBackendCapability.ACTIVATION_INTERVENTION)
         # Enumerated from the ENUM rather than a hand-written list. The previous version named
         # BATCHED_HOOKS explicitly and went stale the moment speediedan/interpretune#449 removed it,
         # which is the failure mode of pinning a vocabulary by transcription: the test breaks on a
         # change it was not written to have an opinion about. Deriving the complement means a member
         # added upstream is asserted absent automatically, and a member removed simply disappears.
-        for absent in set(BackendCapability) - {BackendCapability.INTERVENTION}:
+        for absent in set(ModelBackendCapability) - {ModelBackendCapability.ACTIVATION_INTERVENTION}:
             assert not backend.supports(absent), f"unexpectedly claims {absent}"
 
     def test_satisfies_core_and_intervention_protocols_only(self):

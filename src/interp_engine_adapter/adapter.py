@@ -29,7 +29,7 @@ from typing import Any
 
 from interpretune.adapters.registration import CompositionRegistry
 from interpretune.analysis.backends.capabilities import (
-    BackendCapability,
+    ModelBackendCapability,
     InterventionMode,
     InterventionSupport,
     PositionScope,
@@ -1132,7 +1132,7 @@ def _circuit_tracer_pairing() -> Any:
 
 
 class InterpEngineModelBackend:
-    """The engine as an interpretune ``ModelBackend``: required core plus ``INTERVENTION``.
+    """The engine as an interpretune ``ModelBackend``: required core plus ``ACTIVATION_INTERVENTION``.
 
     CARRIES ITS ENGINE MODEL, because the one it is HANDED is the wrong object. Interpretune's ops call
     ``backend.fwd(model=module.model, batch=batch)``, and every bundled adapter satisfies that because
@@ -1181,11 +1181,11 @@ class InterpEngineModelBackend:
 
     @property
     def capabilities(self) -> frozenset[Any]:
-        return frozenset({BackendCapability.INTERVENTION})
+        return frozenset({ModelBackendCapability.ACTIVATION_INTERVENTION})
 
     @property
     def intervention_support(self) -> InterventionSupport:
-        """Which configurations of ``INTERVENTION`` this backend honours.
+        """Which configurations of ``ACTIVATION_INTERVENTION`` this backend honours.
 
         BOTH scopes, because the engine expresses them one argument apart: ``position_mask`` excludes
         positions, so ``LAST_TOKEN`` is a mask and ``ALL_POSITIONS`` is its absence. Declaring only
@@ -1273,7 +1273,7 @@ class InterpEngineModelBackend:
         """
         if latent_model_handles:
             raise UnmappableHookError(
-                "this backend does not support latent-model handles (it claims INTERVENTION but not "
+                "this backend does not support latent-model handles (it claims ACTIVATION_INTERVENTION but not "
                 "LATENT_MODELS); attach latents through a backend that does, rather than having them "
                 "silently ignored here."
             )

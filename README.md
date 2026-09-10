@@ -57,7 +57,7 @@ says so and points here.
 
 ### Declared capabilities
 
-`INTERVENTION`, and nothing else. Not `LATENT_MODELS`: passing latent-model handles is **refused**
+`ACTIVATION_INTERVENTION`, and nothing else. Not `LATENT_MODELS`: passing latent-model handles is **refused**
 rather than ignored, because a result that looks like an intervention over latents and is not is worse
 than an error. Not `GRADIENTS`.
 
