@@ -1183,6 +1183,78 @@ class InterpEngineModelBackend:
     def capabilities(self) -> frozenset[Any]:
         return frozenset({ModelBackendCapability.ACTIVATION_INTERVENTION})
 
+    def capture_support(self, model: Any) -> Any:
+        """Which vocabulary points this backend can capture on ``model``, derived rather than declared.
+
+        Every base in the architecture's inventory is put through the seam's own resolver, and the split
+        is whatever it answers: resolved bases are capturable, refused ones carry the seam's refusal text
+        as their reason. Deriving it means the record cannot drift from what the adapter actually does --
+        a written-down list would be a second source of truth for a question the resolver already
+        answers, which is the shape this component has had to remove elsewhere.
+
+        The reasons are the `UnmappableHookError` messages verbatim rather than a summary. Those already
+        distinguish the two gaps this adapter is careful about: a name the engine's mapper has no entry
+        for, and a block-level name that is ambiguous across sandwich-norm architectures and is refused
+        rather than silently resolved to the wrong tensor.
+
+        Derived on every call and never cached. The record is instance-derived and interpretune re-queries
+        it after latent models are attached, so a cached answer would describe a model that has since
+        changed.
+        """
+        from interpretune.analysis.backends.capabilities import CaptureSupport
+        from interpretune.analysis.points import component_map_for
+        from interpretune.analysis.points.inventory import inventory, spelled_at
+
+        if model is None:
+            raise ValueError(
+                "capture_support needs the wrapped HuggingFace model to read its architecture and layer "
+                "count; it was given None. This backend is constructible without a module for unit tests, "
+                "and this is the one method that cannot answer in that state."
+            )
+        architecture = self._architecture_of(model)
+        cmap = component_map_for(architecture)
+        engine = self._engine(model)
+
+        capturable: set[str] = set()
+        uncapturable: dict[str, str] = {}
+        for base in inventory(cmap):
+            try:
+                _Seam.point_for(spelled_at(base, cmap), engine)
+                capturable.add(base)
+            except ValueError as exc:
+                uncapturable[base] = str(exc)
+
+        return CaptureSupport(
+            capturable=frozenset(capturable),
+            uncapturable=uncapturable,
+            n_layers=self._n_layers_of(model),
+            architecture=architecture,
+        )
+
+    @staticmethod
+    def _architecture_of(model: Any) -> str:
+        """The HF class name `component_map_for` keys on, from the model's own config."""
+        architectures = getattr(getattr(model, "config", None), "architectures", None)
+        if not architectures:
+            raise ValueError(
+                f"cannot read an architecture from {type(model).__name__}: its config declares no "
+                "`architectures`, and the component map is keyed by that HuggingFace class name."
+            )
+        return str(architectures[0])
+
+    @staticmethod
+    def _n_layers_of(model: Any) -> int:
+        """Layer count from the HF config, which is canonical where the engine's count could disagree."""
+        cfg = getattr(model, "config", None)
+        for attr in ("num_hidden_layers", "n_layer", "n_layers"):
+            value = getattr(cfg, attr, None)
+            if value is not None:
+                return int(value)
+        raise ValueError(
+            f"cannot read a layer count from {type(model).__name__}'s config (tried num_hidden_layers, "
+            "n_layer, n_layers); the capture record needs it to refuse a layer beyond the model."
+        )
+
     @property
     def intervention_support(self) -> InterventionSupport:
         """Which configurations of ``ACTIVATION_INTERVENTION`` this backend honours.
