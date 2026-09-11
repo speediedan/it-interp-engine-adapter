@@ -15,7 +15,7 @@ default_language_version:
 # the rewrite is discarded at the next sync, so the churn buys nothing; and this repo's docstring rules
 # would impose its authoring standards on a repo-neutral master shared with other consumers.
 # Corrections belong upstream, never to the vendored copy.
-exclude: '\.claude/skills/.*'
+exclude: '\.claude/skills/.*|\.agents/skills/.*'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
