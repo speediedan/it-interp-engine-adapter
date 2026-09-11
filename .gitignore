@@ -49,8 +49,11 @@ htmlcov/
 
 # Secrets and per-machine state. `.env` carries live tokens on the maintainer's host and must never be
 # committed; `CLAUDE.local.md` is the private instructions file the checked-in `CLAUDE.md` imports.
+# `AGENTS.override.md` is its agent-neutral analog: a composed snapshot (AGENTS.md plus local
+# files), not a reference, since it shadows AGENTS.md for Codex.
 .env
 CLAUDE.local.md
+AGENTS.override.md
 .claude/settings.local.json
 
 # Editors and OS
