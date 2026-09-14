@@ -843,6 +843,18 @@ def _seam_alias_table() -> dict:
     return _Seam._SUBLAYER_INPUT_ALIASES
 
 
+def _mode_table() -> dict:
+    from interp_engine_adapter.adapter import _MODE_TO_STEER_METHOD
+
+    return _MODE_TO_STEER_METHOD
+
+
+def _refusal_reasons() -> dict:
+    from interp_engine_adapter.adapter import _MODE_REFUSAL_REASONS
+
+    return _MODE_REFUSAL_REASONS
+
+
 class TestInterventionModeIsHonoured:
     """`InterventionSpec.mode` must reach the engine, or be refused -- never silently dropped.
 
@@ -857,7 +869,7 @@ class TestInterventionModeIsHonoured:
 
         assert _steer_method_for("add") == "additive"
 
-    @pytest.mark.parametrize("mode", ["replace", "patch", "project"])
+    @pytest.mark.parametrize("mode", sorted(_refusal_reasons()))
     def test_modes_that_need_the_current_activation_are_refused(self, mode):
         from interp_engine_adapter.adapter import UnmappableHookError, _steer_method_for
 
@@ -873,31 +885,53 @@ class TestInterventionModeIsHonoured:
         for mode, method in _MODE_TO_STEER_METHOD.items():
             assert method in STEER_METHODS, f"{mode!r} maps to {method!r}, absent from {STEER_METHODS}"
 
-    def test_the_refused_modes_are_exactly_the_ones_interpretune_defines(self):
-        """If interpretune adds a mode, this test fails until someone decides how it maps.
+    def test_every_interpretune_mode_is_mapped_or_explicitly_refused(self):
+        """Every interpretune mode is mapped or carries a refusal reason, or this fails naming it.
 
         The failure mode being guarded is a NEW mode defaulting into silence: without this, a mode
-        added upstream would simply not appear in the table and would raise only when someone used it.
+        added upstream would simply not appear in the table and would raise only when someone used
+        it. ``documented`` is derived from the enum rather than a literal, because a literal cannot
+        report on a member that did not exist when it was written.
         """
+        from interpretune.analysis.backends.capabilities import InterventionMode
         from interpretune.analysis.backends.interventions import InterventionSpec
 
-        documented = {"replace", "add", "patch", "project"}
+        from interp_engine_adapter.adapter import _MODE_REFUSAL_REASONS, _uncovered_modes
+
         # `_field_defaults`, not `InterventionSpec.mode`: this is a NamedTuple, so the attribute is the
         # field DESCRIPTOR and comparing it to a string is always False -- an assertion that would have
         # failed for a reason unrelated to what it checks.
         assert InterventionSpec._field_defaults["mode"] == "replace", (
             "the default intervention mode changed; revisit which modes this backend refuses"
         )
-        unmapped = documented - set(_mode_table())
-        assert unmapped == {"replace", "patch", "project"}, (
-            f"interpretune's intervention modes changed: {unmapped}. Decide the mapping or the refusal."
+        documented = {m.value for m in InterventionMode}
+        uncovered = _uncovered_modes(documented, _mode_table(), _MODE_REFUSAL_REASONS)
+        assert uncovered == set(), (
+            f"intervention modes with no mapping and no refusal reason: {sorted(uncovered)}. "
+            "Decide the mapping or the refusal."
         )
 
+    def test_the_coverage_guard_fires_on_an_undecided_mode(self):
+        """Positive control: a mode with no mapping and no reason fails the guard naming it.
 
-def _mode_table() -> dict:
-    from interp_engine_adapter.adapter import _MODE_TO_STEER_METHOD
+        Without this, replacing an inert guard with one whose ability to fire is unverified would
+        repeat the exercise.
+        """
+        from interp_engine_adapter.adapter import _uncovered_modes
 
-    return _MODE_TO_STEER_METHOD
+        uncovered = _uncovered_modes({"add", "probe_undecided"}, {"add": "additive"}, {})
+        assert uncovered == {"probe_undecided"}
+
+    def test_an_explicit_refusal_reason_satisfies_the_guard(self):
+        """Positive control the other way: the reason dict must not become a second inert path."""
+        from interp_engine_adapter.adapter import _uncovered_modes
+
+        uncovered = _uncovered_modes(
+            {"add", "probe_refused"},
+            {"add": "additive"},
+            {"probe_refused": "cannot be expressed, and this string is the reason"},
+        )
+        assert uncovered == set()
 
 
 class TestTheProjectOrthogonalBoundaryIsGuardedByCode:

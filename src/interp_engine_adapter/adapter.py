@@ -672,6 +672,36 @@ _MODE_TO_STEER_METHOD = {"add": "additive"}
 #: first and understand that this changes which subspace is being removed.
 _REJECT_SPAN_CAVEAT = "rank-1 per spec; span operations need orthonormal rows"
 
+#: Explicit refusal reasons for the modes ``_MODE_TO_STEER_METHOD`` does not map, keyed by
+#: interpretune mode value. Each reason names its own mechanism (see the mapping table's notes):
+#: a shared justification previously licensed the ``project -> orthogonal`` substitution this
+#: file refuses. A mode in NEITHER the table NOR this dict is undecided, and the seam test fails
+#: naming it until someone rules. That red is the deliverable, not a side effect.
+_MODE_REFUSAL_REASONS = {
+    "replace": (
+        "an overwrite replaces the whole activation, while every engine steering method moves "
+        "only the component along one direction and leaves the complement untouched"
+    ),
+    "patch": (
+        "a lens-coordinate swap whose targets are measured during the forward, while "
+        "``projection_cap`` takes static min/max fixed when the spec is built"
+    ),
+    "project": (
+        "the complementary projection of the engine's ``orthogonal``: it keeps the parallel "
+        "component where ``orthogonal`` keeps the orthogonal one, so no coefficient converts"
+    ),
+}
+
+
+def _uncovered_modes(documented: set[str], table: dict[str, str], reasons: dict[str, str]) -> set[str]:
+    """Modes with neither a mapping nor an explicit refusal reason.
+
+    Factored so the coverage guard's ability to fire is itself testable: the live seam test
+    derives ``documented`` from ``InterventionMode`` and asserts the result is empty, while the
+    positive controls call this helper with synthetic sets in both directions.
+    """
+    return set(documented) - set(table) - set(reasons)
+
 
 def _steer_method_for(mode: str) -> str:
     """Translate an intervention mode, refusing the ones this backend cannot express faithfully."""
