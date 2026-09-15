@@ -335,11 +335,15 @@ class _Seam:
         per group. Verified against two HuggingFace forward pre-hooks applying the same two vectors at
         the same two scopes, agreeing to 0.0.
 
-        That nesting composes correctly here because every declared mode is ADDITIVE, and addition
-        commutes, so group order cannot matter. A future mode that overwrites rather than accumulates
-        (``replace`` is the obvious one) would make group order significant, and this would then need to
-        define the order or refuse the mixed payload. `_MODE_TO_STEER_METHOD` is the guard: it declares
-        exactly one mode, and `intervention_support` is asserted to agree with it.
+        That nesting composes correctly here while every spec in a mixed payload commutes, and
+        addition is what commutes: several ``add`` specs in any order, and several ``reject`` specs
+        from one orthonormalised operand (orthogonal projectors commute), are order-free. An ``add``
+        and a ``reject`` at the same layer and point do NOT commute -- rejecting after adding differs
+        from adding after rejecting, while the engine applies specs in list order -- so that mixture
+        is refused by name in ``fwd_w_intervention`` before any context opens (see
+        ``_refuse_mixed_modes``). A future mode that overwrites rather than accumulates (``replace``
+        is the obvious one) extends the same refusal. `_MODE_TO_STEER_METHOD` declares the mapped
+        modes, and `intervention_support` is asserted to agree with it.
         """
         from interp_engine import run_with_cache, steer
         from contextlib import ExitStack
@@ -366,6 +370,7 @@ class _Seam:
         point: str = "resid_post",
         minimum: float | None = None,
         maximum: float | None = None,
+        explicit: bool = False,
     ) -> Any:
         """Build one engine ``SteerSpec``.
 
@@ -374,6 +379,14 @@ class _Seam:
         cannot express a working clamp at all: the delta is
         ``(clamp(p, min, max) - p) * unit``, so a spec carrying neither bound collapses to zero for
         every input rather than for the inputs that happen not to need clamping.
+
+        ``explicit`` records that the caller provided every parameter deliberately, as opposed to
+        leaving a default unset. The identity refusal below can only fire on an omission: a mapped
+        ``reject`` at ``scale_factor=0.0`` builds ``orthogonal`` at ``coeff=1.0`` with every
+        parameter set, so refusing it would mistake an explicit identity (which the conformance
+        contract requires) for a missing one. The intervention path always passes ``True`` -- a
+        missing ``scale_factor`` already raises in ``_spec_field`` before this is reached, so an
+        omission cannot arrive that way. Direct callers leave the default, keeping the refusal.
         """
         from interp_engine import SteerSpec
 
@@ -396,7 +409,7 @@ class _Seam:
         # same spec, so the intent cannot be recovered. That is `orthogonal` at the default coeff, and
         # `projection_cap` with no band at all.
         identity = None
-        if method == "orthogonal" and coeff == 1.0:
+        if method == "orthogonal" and coeff == 1.0 and not explicit:
             identity = "coeff=1.0, so the delta is (coeff-1)*projection, which is zero"
         elif method == "projection_cap" and minimum is None and maximum is None:
             identity = "neither a minimum nor a maximum, so the delta is (clamp(p) - p) with no clamp"
@@ -628,11 +641,19 @@ def _names_filter_to_list(names_filter: Any, engine_model: Any) -> list[str]:
 
 
 #: interpretune ``InterventionSpec.mode`` -> interp-engine ``SteerSpec.method``, for the modes whose
-#: semantics were MEASURED to match. Only ``add`` is here; each omission has its own reason, and the
-#: reasons are not interchangeable.
+#: semantics were MEASURED to match. Each omission has its own reason, and the reasons are not
+#: interchangeable.
 #:
 #: ``add`` maps because the operations are the same one: interpretune's ``add`` is
 #: ``h + tensor * scale`` and the engine's ``additive`` delta is ``coeff * vector``.
+#:
+#: ``reject`` maps to ``orthogonal`` with a coefficient rule, not just a method name: the engine's
+#: ``coeff`` is the strength KEPT along the vector while interpretune's ``scale_factor`` is the
+#: fraction REMOVED, so ``coeff = 1 - scale_factor`` (full removal at the default scale of 1.0,
+#: graded ablation bands below it, and the identity at an explicit 0.0). The mapping is exact at
+#: every ``k`` because the adapter orthonormalises the span first (see ``_reject_basis_rows``):
+#: ``VV^+`` is the orthogonal projector onto the span, so an orthonormal basis ``Q`` of the same
+#: span gives ``QQ^T == VV^+`` identically, and each basis vector gets one rank-one engine spec.
 #:
 #: ``project`` is NOT mapped to ``orthogonal``, DESPITE THE NAME, and this is the substitution most
 #: likely to be made by someone reading quickly. They are COMPLEMENTARY projections:
@@ -657,20 +678,22 @@ def _names_filter_to_list(names_filter: Any, engine_model: Any) -> list[str]:
 #: read it. Stating it as the general justification would have licensed exactly the ``project ->
 #: orthogonal`` mapping refused above. Each refusal now names its own mechanism.
 #:
-#: MEASURED CANDIDATES for modes interpretune does not define yet (jlens lane, k=1 only -- see
-#: ``_REJECT_SPAN_CAVEAT``): ``reject`` (h - VV^+h) == ``orthogonal`` with ``coeff=0``, exactly;
-#: ``clamp`` (set the coordinate along v to a target) == ``projection_cap`` with ``min == max ==
-#: target``, exactly. Both verified numerically before being written down.
-_MODE_TO_STEER_METHOD = {"add": "additive"}
+#: MEASURED CANDIDATE for a mode interpretune does not define yet (jlens lane): ``clamp`` (set the
+#: coordinate along v to a target) == ``projection_cap`` with ``min == max == target``, exactly, at
+#: ``k=1``. Verified numerically before being written down. Not mapped: interpretune settled
+#: ``clamp`` as bound-into-range while that equivalence is assign-to-value, so the mapping is not
+#: proposed here.
+_MODE_TO_STEER_METHOD = {"add": "additive", "reject": "orthogonal"}
 
-#: Why the measured ``reject``/``clamp`` mappings are qualified by ``k=1``. The engine's projector is
-#: RANK ONE (``P = v_hat v_hat^T``, one vector per ``SteerSpec``), while the jlens modes are defined
-#: over a ``(k, d_model)`` span. Composing k per-row specs reproduces the span operation ONLY when the
-#: rows are orthonormal: measured, stacked rank-1 rejections equal ``h - VV^+h`` exactly for an
-#: orthonormal ``V`` and NOT for a generic one (row cosine -0.240 was enough to break it). J-lens pole
-#: pairs are not orthonormal by construction, so a caller wanting a span operation must orthonormalize
-#: first and understand that this changes which subspace is being removed.
-_REJECT_SPAN_CAVEAT = "rank-1 per spec; span operations need orthonormal rows"
+#: Why per-row engine specs reproduce a span operation only for orthonormal rows -- and why that
+#: constrains ``clamp`` but no longer ``reject``. The engine's projector is RANK ONE
+#: (``P = v_hat v_hat^T``, one vector per ``SteerSpec``). Composing one spec per row reproduces the
+#: span operation ONLY when the rows are orthonormal (measured: exact for orthonormal ``V``, wrong
+#: at row cosine -0.240). ``reject`` orthonormalises first (see ``_reject_basis_rows``), so the
+#: restriction does not touch it: rejection depends on the span alone. ``clamp`` targets are stated
+#: in pole coordinates, which an orthonormalisation does not preserve, so the restriction stands
+#: there until clamp is ruled on.
+_CLAMP_SPAN_CAVEAT = "rank-1 per spec; span operations need orthonormal rows"
 
 #: Explicit refusal reasons for the modes ``_MODE_TO_STEER_METHOD`` does not map, keyed by
 #: interpretune mode value. Each reason names its own mechanism (see the mapping table's notes):
@@ -716,6 +739,83 @@ def _steer_method_for(mode: str) -> str:
             "wrong mode would complete and return plausible logits for an intervention nobody asked for."
         )
     return method
+
+
+def _coeff_for(mode_value: str, scale_factor: float) -> float:
+    """The engine coefficient for a mapped mode and intervention scale.
+
+    ``add`` passes the scale through (the operations are the same one). ``reject`` complements it:
+    the engine keeps ``coeff`` along the vector while interpretune removes ``scale_factor``, so
+    ``coeff = 1 - scale_factor``. A non-mapped mode never reaches here (``_steer_method_for``
+    refuses it first); the table, not this function, decides what maps.
+    """
+    if mode_value == "reject":
+        return 1.0 - scale_factor
+    return scale_factor
+
+
+def _reject_basis_rows(tensor: Any, hook_name: str) -> list[Any]:
+    """Orthonormal basis rows for a ``reject`` operand, one engine vector per row.
+
+    ``reject`` is defined over a ``(k, d_model)`` span for any ``k >= 1`` while the engine takes
+    one vector per spec, so the adapter orthonormalises and fans out. The basis comes from the
+    row space via SVD, keeping the numerical rank rather than ``k``: dependent rows shrink the
+    span exactly as the pseudoinverse does, and an all-zero operand rejects nothing (also what
+    the pseudoinverse computes). Signs and row order are immaterial -- every per-row projector
+    is sign-invariant and orthonormal projectors commute -- so no canonicalisation is needed.
+    SVD rather than unpivoted QR deliberately: without pivoting, QR's first ``r`` columns need
+    not span a rank-deficient row space, while the SVD basis does by construction.
+    """
+    import torch
+
+    rows = torch.as_tensor(tensor, dtype=torch.float32)
+    if rows.ndim == 1:
+        rows = rows.reshape(1, -1)
+    elif rows.ndim != 2:
+        raise UnmappableHookError(
+            f"intervention tensor for {hook_name!r} has shape {tuple(getattr(tensor, 'shape', ()))}: "
+            "a reject operand is one direction or a (k, d_model) span. Anything else is not a span "
+            "operation this backend can decompose into per-vector specs."
+        )
+    if rows.shape[0] == 0:
+        return []
+    if not bool(torch.isfinite(rows).all()):
+        raise UnmappableHookError(
+            f"intervention tensor for {hook_name!r} carries NaN or inf: the reference computes NaN "
+            "through the pseudoinverse, so an identity here would be a silent divergence rather than "
+            "a span operation. Clean the operand instead."
+        )
+    _, singular, vh = torch.linalg.svd(rows, full_matrices=False)
+    tolerance = max(rows.shape) * torch.finfo(torch.float32).eps * singular[0].item()
+    rank = int((singular > tolerance).sum().item())
+    basis = vh[:rank]
+    input_dtype = getattr(tensor, "dtype", torch.float32)
+    return [row.to(dtype=input_dtype) for row in basis]
+
+
+def _refuse_mixed_modes(targets: list[tuple[int, str, Any]]) -> None:
+    """Refuse an ``add`` and a ``reject`` on the same layer and point, naming the order problem.
+
+    The steering surface nests one context per scope group and applies specs in list order within
+    a group, which is unobservable while every declared mode is additive: addition commutes, so
+    group order cannot matter. ``reject`` is not additive -- rejecting after adding differs from
+    adding after rejecting -- so a mixed payload at one point has no defined meaning until
+    interpretune orders several specs on a point. Same-mode multiplicity is fine (several ``add``
+    specs commute, and several ``reject`` specs from one orthonormalised operand ARE the mapping).
+    """
+    modes_by_point: dict[tuple[int, str], set[str]] = {}
+    for layer, point, spec in targets:
+        mode = _spec_field(spec, "mode", "replace")
+        modes_by_point.setdefault((layer, point), set()).add(getattr(mode, "value", mode))
+    for (layer, point), modes in modes_by_point.items():
+        if "add" in modes and "reject" in modes:
+            raise UnmappableHookError(
+                f"interventions at layer {layer}, point {point!r} mix 'add' and 'reject': rejecting "
+                "after adding differs from adding after rejecting, and the engine applies specs in "
+                "list order within a group, so the payload has no defined meaning. Split the modes "
+                "across calls, or wait until interpretune defines an order for several specs on one "
+                "point. Same-mode multiplicity is unaffected."
+            )
 
 
 def _require_expressible_operand(tensor: Any, hook_name: str) -> Any:
@@ -1336,24 +1436,26 @@ class InterpEngineModelBackend:
         ``LAST_TOKEN`` would have been the easy answer and the wrong one -- it would refuse an operation
         this backend can perform exactly, which is the mirror image of silently narrowing one.
 
-        ONE mode, and the asymmetry is real rather than an omission. The reason is NOT that the engine
-        cannot see the current activation, which an earlier version of this docstring claimed: two of its
-        three steering methods read it (``orthogonal`` and ``projection_cap`` both project the residual
-        onto the vector), and only ``additive`` does not. The reason is that the three are a closed set
-        of specific arithmetic forms rather than a general "compute a delta from h" hook, and none
-        computes what these modes need:
+        TWO modes. The reason the others stay out is NOT that the engine cannot see the current
+        activation, which an earlier version of this docstring claimed: two of its three steering
+        methods read it (``orthogonal`` and ``projection_cap`` both project the residual onto the
+        vector), and only ``additive`` does not. The reason is that the three are a closed set of
+        specific arithmetic forms rather than a general "compute a delta from h" hook, and the missing
+        modes need arithmetic none of them computes -- except ``reject``, which ``orthogonal``
+        computes exactly once the span is orthonormalised (see the mapping table):
 
+        * ``reject`` maps with ``coeff = 1 - scale_factor`` over an orthonormalised span basis.
         * ``project`` keeps the component PARALLEL to the vector where ``orthogonal`` keeps the
           ORTHOGONAL one. Complementary projections, so no coefficient converts one into the other.
         * ``patch`` needs targets measured during the forward, per token, while ``projection_cap``'s
           bounds go through ``float()`` and so cannot vary by position.
         * ``replace`` needs an arbitrary target, which no method computes.
 
-        Each is a missing OPERATION or a missing per-token PARAMETER, never a missing observation. The
-        distinction matters to a reader deciding whether some future engine release closes the gap:
-        activation-blindness would be fixed by a new hook, and these are fixed by new arithmetic.
-        `_steer_method_for` refuses all three by name; this declaration is the same fact stated ahead of
-        the call, so the gate can refuse before reaching this backend at all.
+        Each refusal is a missing OPERATION or a missing per-token PARAMETER, never a missing
+        observation. The distinction matters to a reader deciding whether some future engine release
+        closes the gap: activation-blindness would be fixed by a new hook, and these are fixed by
+        new arithmetic. `_steer_method_for` refuses all three by name; this declaration is the same
+        fact stated ahead of the call, so the gate can refuse before reaching this backend at all.
         """
         # Derived from the mapping rather than restated, so the two cannot disagree. That also means a
         # test comparing this declaration against the mapping compares the mapping to itself and can
@@ -1423,20 +1525,51 @@ class InterpEngineModelBackend:
             )
         tokens = _tokens_from_batch(batch)
         # Paired with its scope rather than flattened: the engine's `SteerSpec` has no position field,
-        # so the scope has to travel beside the spec to reach the mask that expresses it.
-        specs = [
-            (
-                normalize_position_scope(_spec_field(spec, "position_scope", PositionScope.LAST_TOKEN)),
-                _Seam.steer_spec(
-                    vector=_require_expressible_operand(_spec_field(spec, "intervention_tensor"), point),
-                    layer=layer,
-                    coeff=_spec_field(spec, "scale_factor"),
-                    method=_steer_method_for(_spec_field(spec, "mode", "replace")),
-                    point=point,
-                ),
+        # so the scope has to travel beside the spec to reach the mask that expresses it. One
+        # InterventionSpec fans out to one or more engine specs: `add` is one-to-one, while `reject`
+        # over a (k, d) span becomes one spec per orthonormalised basis vector (see
+        # `_reject_basis_rows`). Mixed `add`/`reject` at one point is refused before any of that, in
+        # `_refuse_mixed_modes`, because the two do not commute.
+        targets = list(_intervention_targets(interventions, self._engine(model)))
+        _refuse_mixed_modes(targets)
+        specs: list[tuple[Any, Any]] = []
+        for layer, point, spec in targets:
+            mode = _spec_field(spec, "mode", "replace")
+            mode_value = getattr(mode, "value", mode)
+            method = _steer_method_for(mode)
+            scale = _spec_field(spec, "scale_factor")
+            scope = normalize_position_scope(_spec_field(spec, "position_scope", PositionScope.LAST_TOKEN))
+            tensor = _spec_field(spec, "intervention_tensor")
+            if mode_value == "reject":
+                rows = _reject_basis_rows(tensor, point)
+                for row in rows:
+                    specs.append(
+                        (
+                            scope,
+                            _Seam.steer_spec(
+                                vector=row,
+                                layer=layer,
+                                coeff=_coeff_for(mode_value, scale),
+                                method=method,
+                                point=point,
+                                explicit=True,
+                            ),
+                        )
+                    )
+                continue
+            specs.append(
+                (
+                    scope,
+                    _Seam.steer_spec(
+                        vector=_require_expressible_operand(tensor, point),
+                        layer=layer,
+                        coeff=_coeff_for(mode_value, scale),
+                        method=method,
+                        point=point,
+                        explicit=True,
+                    ),
+                )
             )
-            for layer, point, spec in _intervention_targets(interventions, self._engine(model))
-        ]
         engine = self._engine(model)
         attention_mask = _attention_mask_from_batch(batch)
         pre = _Seam.forward(engine, tokens, attention_mask=attention_mask)

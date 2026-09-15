@@ -986,13 +986,156 @@ class TestTheProjectOrthogonalBoundaryIsGuardedByCode:
             _steer_method_for("project")
 
 
+class TestRejectMapping:
+    """`reject` maps to `orthogonal` through an orthonormalising change of basis, at every `k`.
+
+    The ruling: ``VV^+`` is the orthogonal projector onto ``span(V)`` regardless of what the rows
+    look like, so orthonormal rows reproduce it exactly while raw rows do not (measured 0.1 off at
+    row cosine -0.240). The reference throughout is interpretune's own ``_apply_span_rejection``
+    (pseudoinverse), not a re-derivation here: a backend author deriving their own oracle is the
+    same tree answering twice.
+    """
+
+    TOLERANCE = 1e-5  # measured agreement is ~1e-7; two orders of slack for cross-machine float
+
+    @staticmethod
+    def _workbench():
+        import torch
+
+        torch.manual_seed(7)
+        h = torch.randn(5, 64)
+        first = torch.zeros(64)
+        first[0] = 1.0
+        second = torch.zeros(64)
+        second[0] = -0.24
+        second[1] = (1.0 - 0.24**2) ** 0.5
+        return h, torch.stack([first, second])
+
+    @staticmethod
+    def _reference(h, V, alpha):
+        from interpretune.analysis.backends.interventions import InterventionSpec, _apply_span_rejection
+
+        spec = InterventionSpec(intervention_tensor=V, mode="reject", scale_factor=alpha)
+        return _apply_span_rejection(spec, input_value=h, target=V)
+
+    @staticmethod
+    def _mapped(h, V, alpha):
+        import torch
+        from interp_engine import SteerSpec
+        from interp_engine.steer import steer_delta
+
+        from interp_engine_adapter.adapter import _coeff_for, _reject_basis_rows
+
+        coeff = _coeff_for("reject", alpha)
+        total = torch.zeros_like(h)
+        for row in _reject_basis_rows(V, "test"):
+            total = total + steer_delta(SteerSpec(vector=row, layer=0, coeff=coeff, method="orthogonal"), h, row)
+        return h + total
+
+    def test_coeff_rule_complements_the_scale(self):
+        from interp_engine_adapter.adapter import _coeff_for
+
+        for scale, expected in ((0.0, 1.0), (0.5, 0.5), (1.0, 0.0)):
+            assert _coeff_for("reject", scale) == expected
+            assert _coeff_for("add", scale) == scale
+
+    @pytest.mark.parametrize("alpha", [1.0, 0.5])
+    def test_mapped_matches_reference_at_k2(self, alpha):
+        import torch
+
+        h, V = self._workbench()
+        got, want = self._mapped(h, V, alpha), self._reference(h, V, alpha)
+        assert torch.max((got - want).abs()).item() < self.TOLERANCE
+
+    def test_mapped_matches_reference_at_k1(self):
+        import torch
+
+        h, V = self._workbench()
+        got, want = self._mapped(h, V[:1], 0.3), self._reference(h, V[:1], 0.3)
+        assert torch.max((got - want).abs()).item() < self.TOLERANCE
+
+    @pytest.mark.parametrize("alpha", [1.0, 0.5])
+    def test_raw_row_composition_must_fail(self, alpha):
+        """The negative control the caveat exists for: un-orthonormalised rows are wrong, loudly."""
+        import torch
+        from interp_engine import SteerSpec
+        from interp_engine.steer import steer_delta
+
+        h, V = self._workbench()
+        total = torch.zeros_like(h)
+        for row in V:
+            total = total + steer_delta(SteerSpec(vector=row, layer=0, coeff=1.0 - alpha, method="orthogonal"), h, row)
+        assert torch.max((h + total - self._reference(h, V, alpha)).abs()).item() > 1e-2
+
+    def test_rank_deficient_span_shrinks_to_its_rank(self):
+        import torch
+
+        h, V = self._workbench()
+        duplicated = torch.stack([V[0], V[0]])
+        got, want = self._mapped(h, duplicated, 1.0), self._reference(h, duplicated, 1.0)
+        assert torch.max((got - want).abs()).item() < self.TOLERANCE
+
+    def test_zero_scale_builds_an_explicit_identity(self):
+        """A mapped reject at ``scale_factor=0.0`` is an explicit request, never an omission."""
+        import torch
+
+        from interp_engine_adapter.adapter import _Seam
+
+        spec = _Seam.steer_spec(vector=torch.randn(8), layer=0, coeff=1.0, method="orthogonal", explicit=True)
+        assert spec.coeff == 1.0
+
+    def test_mixed_add_and_reject_at_one_point_is_refused_by_name(self):
+        from interp_engine_adapter.adapter import UnmappableHookError, _refuse_mixed_modes
+
+        with pytest.raises(UnmappableHookError, match="mix 'add' and 'reject'"):
+            _refuse_mixed_modes(
+                [
+                    (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
+                    (0, "p", {"mode": "reject", "intervention_tensor": 0, "scale_factor": 1.0}),
+                ]
+            )
+
+    def test_same_mode_multiplicity_is_not_a_mixture(self):
+        from interp_engine_adapter.adapter import _refuse_mixed_modes
+
+        _refuse_mixed_modes(
+            [
+                (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
+                (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 0.5}),
+            ]
+        )
+        _refuse_mixed_modes([(0, "p", {"mode": "reject", "intervention_tensor": 0, "scale_factor": 1.0})])
+
+    def test_reject_operand_shapes(self):
+        import torch
+
+        from interp_engine_adapter.adapter import UnmappableHookError, _reject_basis_rows
+
+        rows = _reject_basis_rows(torch.randn(8), "p")
+        assert len(rows) == 1 and torch.allclose(rows[0].norm(), torch.tensor(1.0))
+        rows = _reject_basis_rows(torch.randn(3, 8), "p")
+        assert len(rows) == 3
+        assert torch.allclose(torch.stack(rows) @ torch.stack(rows).T, torch.eye(3), atol=1e-6)
+        assert _reject_basis_rows(torch.empty(0, 8), "p") == []
+        with pytest.raises(UnmappableHookError, match="one direction"):
+            _reject_basis_rows(torch.randn(2, 2, 8), "p")
+        with pytest.raises(UnmappableHookError, match="NaN"):
+            _reject_basis_rows(torch.full((2, 8), float("nan")), "p")
+
+    def test_modes_declaration_matches_the_ruled_mapping(self):
+        from interp_engine_adapter.adapter import _MODE_REFUSAL_REASONS, _MODE_TO_STEER_METHOD
+
+        assert set(_MODE_TO_STEER_METHOD) == {"add", "reject"}
+        assert set(_MODE_REFUSAL_REASONS) == {"replace", "patch", "project"}
+
+
 class TestSpanOperandsAreRefused:
     """A `(k, d_model)` operand must be refused HERE, because the engine does not reliably refuse it.
 
-    interp-engine's projector is rank-one. With `orthogonal`/`projection_cap` a span operand raises, but
-    with a tensor-size message that names neither the span nor the projector. With `additive` it does
-    not raise at all when `k` equals the sequence length: it broadcasts positionally and returns a
-    plausible result that is not a span operation.
+    This is the additive path (`_require_expressible_operand`): interp-engine's projector is
+    rank-one, and with `additive` a span operand broadcasts positionally rather than raising.
+    `reject` spans take the other path -- orthonormalised and fanned out in `_reject_basis_rows`,
+    pinned by `TestRejectMapping` -- so this class stays scoped to the hazard it names.
     """
 
     def test_a_span_operand_is_refused_with_the_reason(self):
