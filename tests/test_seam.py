@@ -1084,14 +1084,40 @@ class TestRejectMapping:
         spec = _Seam.steer_spec(vector=torch.randn(8), layer=0, coeff=1.0, method="orthogonal", explicit=True)
         assert spec.coeff == 1.0
 
-    def test_mixed_add_and_reject_at_one_point_is_refused_by_name(self):
+    def test_mixed_add_and_reject_in_one_scope_flows_through(self):
+        """Declaration order is the contract within a scope: no refusal, order preserved upstream."""
+        from interp_engine_adapter.adapter import _refuse_mixed_modes
+
+        _refuse_mixed_modes(
+            [
+                (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
+                (0, "p", {"mode": "reject", "intervention_tensor": 0, "scale_factor": 1.0}),
+            ]
+        )
+        _refuse_mixed_modes(
+            [
+                (0, "p", {"mode": "reject", "intervention_tensor": 0, "scale_factor": 1.0}),
+                (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
+            ]
+        )
+
+    def test_mixed_add_and_reject_across_scopes_is_refused_by_name(self):
         from interp_engine_adapter.adapter import UnmappableHookError, _refuse_mixed_modes
 
-        with pytest.raises(UnmappableHookError, match="mix 'add' and 'reject'"):
+        with pytest.raises(UnmappableHookError, match="across position scopes"):
             _refuse_mixed_modes(
                 [
                     (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
-                    (0, "p", {"mode": "reject", "intervention_tensor": 0, "scale_factor": 1.0}),
+                    (
+                        0,
+                        "p",
+                        {
+                            "mode": "reject",
+                            "intervention_tensor": 0,
+                            "scale_factor": 1.0,
+                            "position_scope": "all_positions",
+                        },
+                    ),
                 ]
             )
 

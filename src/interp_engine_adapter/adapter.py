@@ -338,10 +338,11 @@ class _Seam:
         That nesting composes correctly here while every spec in a mixed payload commutes, and
         addition is what commutes: several ``add`` specs in any order, and several ``reject`` specs
         from one orthonormalised operand (orthogonal projectors commute), are order-free. An ``add``
-        and a ``reject`` at the same layer and point do NOT commute -- rejecting after adding differs
-        from adding after rejecting, while the engine applies specs in list order -- so that mixture
-        is refused by name in ``fwd_w_intervention`` before any context opens (see
-        ``_refuse_mixed_modes``). A future mode that overwrites rather than accumulates (``replace``
+        and a ``reject`` split across scopes at one point do NOT commute -- rejecting after adding
+        differs from adding after rejecting, while nested per-scope contexts fire in an order that
+        is unmeasured relative to declaration order -- so that mixture is refused by name in
+        ``fwd_w_intervention`` (see ``_refuse_mixed_modes``). Within one scope, declaration order
+        flows through untouched. A future mode that overwrites rather than accumulates (``replace``
         is the obvious one) extends the same refusal. `_MODE_TO_STEER_METHOD` declares the mapped
         modes, and `intervention_support` is asserted to agree with it.
         """
@@ -794,28 +795,35 @@ def _reject_basis_rows(tensor: Any, hook_name: str) -> list[Any]:
 
 
 def _refuse_mixed_modes(targets: list[tuple[int, str, Any]]) -> None:
-    """Refuse an ``add`` and a ``reject`` on the same layer and point, naming the order problem.
+    """Refuse non-commuting modes mixed ACROSS scopes at one point, naming the unmeasured order.
 
-    The steering surface nests one context per scope group and applies specs in list order within
-    a group, which is unobservable while every declared mode is additive: addition commutes, so
-    group order cannot matter. ``reject`` is not additive -- rejecting after adding differs from
-    adding after rejecting -- so a mixed payload at one point has no defined meaning until
-    interpretune orders several specs on a point. Same-mode multiplicity is fine (several ``add``
-    specs commute, and several ``reject`` specs from one orthonormalised operand ARE the mapping).
+    Interpretune's contract is sequential application in declaration order, and within one scope
+    this backend honours it exactly: specs are grouped by scope preserving declaration order, and
+    the engine applies each group's specs in list order. Across scopes on the same point the
+    adapter enters one nested steering context per scope, and the order in which nested contexts'
+    hooks fire relative to declaration order is unmeasured -- so an ``add`` and a ``reject`` split
+    across scopes has no defined meaning yet and is refused. Same scope (even mixed) flows
+    through in declaration order; same-mode multiplicity anywhere is fine.
     """
-    modes_by_point: dict[tuple[int, str], set[str]] = {}
+    scopes_by_point: dict[tuple[int, str], dict[str, set[Any]]] = {}
     for layer, point, spec in targets:
         mode = _spec_field(spec, "mode", "replace")
-        modes_by_point.setdefault((layer, point), set()).add(getattr(mode, "value", mode))
-    for (layer, point), modes in modes_by_point.items():
-        if "add" in modes and "reject" in modes:
-            raise UnmappableHookError(
-                f"interventions at layer {layer}, point {point!r} mix 'add' and 'reject': rejecting "
-                "after adding differs from adding after rejecting, and the engine applies specs in "
-                "list order within a group, so the payload has no defined meaning. Split the modes "
-                "across calls, or wait until interpretune defines an order for several specs on one "
-                "point. Same-mode multiplicity is unaffected."
-            )
+        mode_value = getattr(mode, "value", mode)
+        scope = _spec_field(spec, "position_scope", PositionScope.LAST_TOKEN)
+        scope_value = getattr(scope, "value", scope)
+        scopes_by_point.setdefault((layer, point), {}).setdefault(mode_value, set()).add(scope_value)
+    for (layer, point), by_mode in scopes_by_point.items():
+        if "add" in by_mode and "reject" in by_mode:
+            scopes = by_mode["add"] | by_mode["reject"]
+            if len(scopes) > 1:
+                raise UnmappableHookError(
+                    f"interventions at layer {layer}, point {point!r} mix 'add' and 'reject' "
+                    "across position scopes: rejecting after adding differs from adding after "
+                    "rejecting, and this backend enters one nested steering context per scope, "
+                    "whose firing order relative to declaration order is unmeasured. Keep "
+                    "non-commuting modes in one scope, where declaration order is honoured "
+                    "exactly, or split them across calls."
+                )
 
 
 def _require_expressible_operand(tensor: Any, hook_name: str) -> Any:
