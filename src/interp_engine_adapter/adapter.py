@@ -656,6 +656,16 @@ def _names_filter_to_list(names_filter: Any, engine_model: Any) -> list[str]:
 #: ``VV^+`` is the orthogonal projector onto the span, so an orthonormal basis ``Q`` of the same
 #: span gives ``QQ^T == VV^+`` identically, and each basis vector gets one rank-one engine spec.
 #:
+#: ``clamp`` maps to ``projection_cap`` with the band scaled by the row's norm: interpretune clips
+#: the pseudoinverse coordinates ``c = V^+ h`` into ``[lo, hi]`` while the engine clips the projection
+#: onto the UNIT direction ``p = h . v_hat``, and for one row ``p = c ||v||``, so an engine band of
+#: ``[lo*||v||, hi*||v||]`` reproduces the interpretune band exactly (each side only when supplied).
+#: Exact at ``k=1`` and for mutually orthogonal rows (one cap per row, either order -- orthogonal
+#: caps commute). Coupled rows are refused by name (see ``_clamp_cap_rows``): the coordinates are
+#: pseudoinverse coefficients depending on every row, so neither per-row caps nor an orthonormalised
+#: basis reproduces the band. Orthonormalising for clamp is therefore refused along with
+#: approximating, unlike ``reject`` where it is the mapping.
+#:
 #: ``project`` is NOT mapped to ``orthogonal``, DESPITE THE NAME, and this is the substitution most
 #: likely to be made by someone reading quickly. They are COMPLEMENTARY projections:
 #:
@@ -678,13 +688,7 @@ def _names_filter_to_list(names_filter: Any, engine_model: Any) -> list[str]:
 #: activation" is true of ``additive`` and false of ``orthogonal`` and ``projection_cap``, which both
 #: read it. Stating it as the general justification would have licensed exactly the ``project ->
 #: orthogonal`` mapping refused above. Each refusal now names its own mechanism.
-#:
-#: MEASURED CANDIDATE for a mode interpretune does not define yet (jlens lane): ``clamp`` (set the
-#: coordinate along v to a target) == ``projection_cap`` with ``min == max == target``, exactly, at
-#: ``k=1``. Verified numerically before being written down. Not mapped: interpretune settled
-#: ``clamp`` as bound-into-range while that equivalence is assign-to-value, so the mapping is not
-#: proposed here.
-_MODE_TO_STEER_METHOD = {"add": "additive", "reject": "orthogonal"}
+_MODE_TO_STEER_METHOD = {"add": "additive", "reject": "orthogonal", "clamp": "projection_cap"}
 
 #: Why per-row engine specs reproduce a span operation only for orthonormal rows -- and why that
 #: constrains ``clamp`` but no longer ``reject``. The engine's projector is RANK ONE
@@ -692,8 +696,8 @@ _MODE_TO_STEER_METHOD = {"add": "additive", "reject": "orthogonal"}
 #: span operation ONLY when the rows are orthonormal (measured: exact for orthonormal ``V``, wrong
 #: at row cosine -0.240). ``reject`` orthonormalises first (see ``_reject_basis_rows``), so the
 #: restriction does not touch it: rejection depends on the span alone. ``clamp`` targets are stated
-#: in pole coordinates, which an orthonormalisation does not preserve, so the restriction stands
-#: there until clamp is ruled on.
+#: in pole coordinates, which an orthonormalisation does not preserve, so coupled rows are refused
+#: by name (see ``_clamp_cap_rows``) rather than orthonormalised or approximated.
 _CLAMP_SPAN_CAVEAT = "rank-1 per spec; span operations need orthonormal rows"
 
 #: Explicit refusal reasons for the modes ``_MODE_TO_STEER_METHOD`` does not map, keyed by
@@ -792,6 +796,58 @@ def _reject_basis_rows(tensor: Any, hook_name: str) -> list[Any]:
     basis = vh[:rank]
     input_dtype = getattr(tensor, "dtype", torch.float32)
     return [row.to(dtype=input_dtype) for row in basis]
+
+
+def _clamp_cap_rows(tensor: Any, hook_name: str) -> list[tuple[Any, float]]:
+    """One ``(row, row norm)`` per clamp cap: exact only for orthogonal rows.
+
+    ``clamp`` bounds pseudoinverse coordinates, which depend on every row at once, so unlike
+    ``reject`` the operand must already be orthogonal -- orthonormalising would change what the
+    band bounds. Pairwise row cosines above ``_CLAMP_ORTHOGONALITY_TOLERANCE`` are refused by
+    name rather than approximated, as is a zero row (no unit direction to cap along).
+    """
+    import torch
+
+    rows = torch.as_tensor(tensor, dtype=torch.float32)
+    if rows.ndim == 1:
+        rows = rows.reshape(1, -1)
+    elif rows.ndim != 2:
+        raise UnmappableHookError(
+            f"intervention tensor for {hook_name!r} has shape {tuple(getattr(tensor, 'shape', ()))}: "
+            "a clamp operand is one direction or a (k, d_model) span of mutually orthogonal rows. "
+            "Anything else is not a band operation this backend can decompose into per-vector caps."
+        )
+    if rows.shape[0] == 0:
+        return []
+    if not bool(torch.isfinite(rows).all()):
+        raise UnmappableHookError(
+            f"intervention tensor for {hook_name!r} carries NaN or inf: clean the operand instead."
+        )
+    norms = rows.norm(dim=1)
+    if not bool((norms > 0).all()):
+        raise UnmappableHookError(
+            f"intervention tensor for {hook_name!r} has a zero row: a clamp caps the projection "
+            "onto the row's UNIT direction, and a zero row has none. Remove it instead."
+        )
+    unit = rows / norms.unsqueeze(1)
+    cosines = unit @ unit.T
+    off = cosines - torch.eye(rows.shape[0])
+    worst = off.abs().max().item()
+    if worst > _CLAMP_ORTHOGONALITY_TOLERANCE:
+        raise UnmappableHookError(
+            f"intervention tensor for {hook_name!r} has coupled rows (worst pairwise cosine "
+            f"{worst:.3g} above {_CLAMP_ORTHOGONALITY_TOLERANCE:g}): clamp coordinates are "
+            "pseudoinverse coefficients that depend on every row, and a rank-one cap bounds a "
+            "different quantity, so neither per-row caps nor an orthonormalised basis reproduces "
+            "the band. Pass mutually orthogonal rows instead."
+        )
+    input_dtype = getattr(tensor, "dtype", torch.float32)
+    return [(row.to(dtype=input_dtype), float(norm)) for row, norm in zip(rows, norms.tolist())]
+
+
+#: The largest pairwise row cosine a clamp operand may carry: orthogonal caps commute, so order is
+#: free, while anything above this is a coupled span the rank-one caps cannot reproduce.
+_CLAMP_ORTHOGONALITY_TOLERANCE = 1e-6
 
 
 def _refuse_mixed_modes(targets: list[tuple[int, str, Any]]) -> None:
@@ -1560,6 +1616,25 @@ class InterpEngineModelBackend:
                                 coeff=_coeff_for(mode_value, scale),
                                 method=method,
                                 point=point,
+                                explicit=True,
+                            ),
+                        )
+                    )
+                continue
+            if mode_value == "clamp":
+                lo = _spec_field(spec, "clamp_min", None)
+                hi = _spec_field(spec, "clamp_max", None)
+                for row, norm in _clamp_cap_rows(tensor, point):
+                    specs.append(
+                        (
+                            scope,
+                            _Seam.steer_spec(
+                                vector=row,
+                                layer=layer,
+                                method=method,
+                                point=point,
+                                minimum=None if lo is None else lo * norm,
+                                maximum=None if hi is None else hi * norm,
                                 explicit=True,
                             ),
                         )

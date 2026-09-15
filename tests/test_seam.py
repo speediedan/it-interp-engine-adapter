@@ -1151,8 +1151,159 @@ class TestRejectMapping:
     def test_modes_declaration_matches_the_ruled_mapping(self):
         from interp_engine_adapter.adapter import _MODE_REFUSAL_REASONS, _MODE_TO_STEER_METHOD
 
-        assert set(_MODE_TO_STEER_METHOD) == {"add", "reject"}
+        assert set(_MODE_TO_STEER_METHOD) == {"add", "reject", "clamp"}
         assert set(_MODE_REFUSAL_REASONS) == {"replace", "patch", "project"}
+
+
+class TestClampMapping:
+    """`clamp` maps to `projection_cap` with the band scaled by each row's norm.
+
+    The ruling: for one row the engine's unit projection is the interpretune coordinate times the
+    row's norm, so a norm-scaled band reproduces it exactly; orthogonal rows take one cap each, in
+    either order. Coupled rows are refused by name -- neither per-row caps nor an orthonormalised
+    basis reproduces a pseudoinverse-coordinate band. The reference throughout is interpretune's
+    own ``_apply_span_clamp``, not a re-derivation here.
+    """
+
+    TOLERANCE = 1e-5  # measured agreement is ~1e-6; one order of slack for cross-machine float
+    LO, HI = -0.5, 0.5  # bites: ~60% of unit-projection coordinates fall outside it
+
+    @staticmethod
+    def _workbench():
+        import torch
+
+        torch.manual_seed(7)
+        h = torch.randn(5, 64)
+        first = torch.zeros(64)
+        first[0] = 2.5
+        second = torch.zeros(64)
+        second[1] = 1.5
+        return h, torch.stack([first, second])
+
+    @staticmethod
+    def _coupled():
+        import torch
+
+        torch.manual_seed(7)
+        h = torch.randn(5, 64)
+        first = torch.zeros(64)
+        first[0] = 1.0
+        second = torch.zeros(64)
+        second[0] = -0.24
+        second[1] = (1.0 - 0.24**2) ** 0.5
+        return h, torch.stack([first, second])
+
+    @classmethod
+    def _reference(cls, h, V, lo=LO, hi=HI):
+        from interpretune.analysis.backends.interventions import InterventionSpec, _apply_span_clamp
+
+        spec = InterventionSpec(intervention_tensor=V, mode="clamp", clamp_min=lo, clamp_max=hi)
+        return _apply_span_clamp(spec, input_value=h, target=V)
+
+    @classmethod
+    def _mapped(cls, h, V, lo=LO, hi=HI):
+        import torch
+        from interp_engine.steer import steer_delta
+
+        from interp_engine_adapter.adapter import _Seam, _clamp_cap_rows
+
+        total = torch.zeros_like(h)
+        for row, norm in _clamp_cap_rows(V, "test"):
+            minimum = None if lo is None else lo * norm
+            maximum = None if hi is None else hi * norm
+            spec = _Seam.steer_spec(
+                vector=row, layer=0, method="projection_cap", minimum=minimum, maximum=maximum, explicit=True
+            )
+            total = total + steer_delta(spec, h, row)
+        return h + total
+
+    def test_mapped_matches_reference_at_k1(self):
+        import torch
+
+        h, V = self._workbench()
+        got, want = self._mapped(h, V[:1]), self._reference(h, V[:1])
+        assert torch.max((got - want).abs()).item() < self.TOLERANCE
+
+    def test_mapped_matches_reference_at_orthogonal_k2(self):
+        import torch
+
+        h, V = self._workbench()
+        got, want = self._mapped(h, V), self._reference(h, V)
+        assert torch.max((got - want).abs()).item() < self.TOLERANCE
+
+    def test_sequential_application_matches_in_either_order(self):
+        """Orthogonal caps commute, so both application orders reproduce the reference."""
+        import torch
+        from interp_engine.steer import steer_delta
+
+        from interp_engine_adapter.adapter import _Seam, _clamp_cap_rows
+
+        h, V = self._workbench()
+        for rows in ([0, 1], [1, 0]):
+            current = h
+            for i in rows:
+                row, norm = _clamp_cap_rows(V, "test")[i]
+                spec = _Seam.steer_spec(
+                    vector=row,
+                    layer=0,
+                    method="projection_cap",
+                    minimum=self.LO * norm,
+                    maximum=self.HI * norm,
+                    explicit=True,
+                )
+                current = current + steer_delta(spec, current, row)
+            assert torch.max((current - self._reference(h, V)).abs()).item() < self.TOLERANCE
+
+    def test_one_sided_band_maps(self):
+        import torch
+
+        h, V = self._workbench()
+        got, want = self._mapped(h, V[:1], lo=0.0, hi=None), self._reference(h, V[:1], lo=0.0, hi=None)
+        assert torch.max((got - want).abs()).item() < self.TOLERANCE
+
+    def test_unscaled_band_must_fail(self):
+        """The control the coefficient conversion exists for: an unscaled band is wrong, loudly."""
+        import torch
+        from interp_engine.steer import steer_delta
+
+        from interp_engine_adapter.adapter import _Seam, _clamp_cap_rows
+
+        h, V = self._workbench()
+        total = torch.zeros_like(h)
+        for row, _norm in _clamp_cap_rows(V[:1], "test"):
+            spec = _Seam.steer_spec(
+                vector=row, layer=0, method="projection_cap", minimum=self.LO, maximum=self.HI, explicit=True
+            )
+            total = total + steer_delta(spec, h, row)
+        assert torch.max((h + total - self._reference(h, V[:1])).abs()).item() > 1e-2
+
+    def test_coupled_rows_are_refused_by_name(self):
+        from interp_engine_adapter.adapter import UnmappableHookError, _clamp_cap_rows
+
+        h, V = self._coupled()
+        with pytest.raises(UnmappableHookError, match="coupled rows"):
+            _clamp_cap_rows(V, "test")
+
+    def test_zero_row_is_refused_by_name(self):
+        import torch
+
+        from interp_engine_adapter.adapter import UnmappableHookError, _clamp_cap_rows
+
+        with pytest.raises(UnmappableHookError, match="zero row"):
+            _clamp_cap_rows(torch.zeros(2, 8), "test")
+
+    def test_cap_row_shapes(self):
+        import torch
+
+        from interp_engine_adapter.adapter import UnmappableHookError, _clamp_cap_rows
+
+        rows = _clamp_cap_rows(torch.randn(8), "p")
+        assert len(rows) == 1 and rows[0][1] == pytest.approx(rows[0][0].norm().item())
+        assert _clamp_cap_rows(torch.empty(0, 8), "p") == []
+        with pytest.raises(UnmappableHookError, match="one direction"):
+            _clamp_cap_rows(torch.randn(2, 2, 8), "p")
+        with pytest.raises(UnmappableHookError, match="NaN"):
+            _clamp_cap_rows(torch.full((2, 8), float("nan")), "p")
 
 
 class TestSpanOperandsAreRefused:
@@ -1410,7 +1561,12 @@ class TestEveryDeclaredModeCanActuallySteer:
             steered = False
             for coeff in self.COEFFS:
                 try:
-                    spec = _Seam.steer_spec(vector=vector, layer=0, coeff=coeff, method=method)
+                    if method == "projection_cap":
+                        # A bandless cap is the method's identity and the seam refuses it at
+                        # build time; sweep with a band the residuals actually cross instead.
+                        spec = _Seam.steer_spec(vector=vector, layer=0, method=method, minimum=-1.0, maximum=1.0)
+                    else:
+                        spec = _Seam.steer_spec(vector=vector, layer=0, coeff=coeff, method=method)
                 except UnmappableHookError:
                     # This coefficient is the method's identity and the seam refuses it at build time.
                     # That IS the guard working, so it is not a failure here; keep looking for one that
