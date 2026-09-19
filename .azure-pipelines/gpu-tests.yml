@@ -195,6 +195,29 @@ jobs:
 
       - bash: |
           set -e
+          # The conformance seed (interpretune's SEED_REPO at SEED_REVISION) is a PRIVATE Hub component
+          # the suite loads cache-only from HF_HOME; nothing else populates components on this mount,
+          # so warm it here (small, pinned, idempotent) with a token scoped to this step. Fetch-only:
+          # nothing hydrates, mirroring interpretune's "Warm Hub components" step.
+          python - <<'PY'
+          from interpretune.testing.conformance.inputs import SEED_REPO, SEED_REVISION
+          from interpretune.hub.components import (
+              pull_component_config,
+              pull_component_manifest,
+              pull_component_payloads,
+          )
+          manifest, commit = pull_component_manifest(SEED_REPO, revision=SEED_REVISION)
+          pull_component_payloads(SEED_REPO, manifest, commit)
+          for key in sorted(((manifest.get("module") or {}).get("configs") or {})):
+              pull_component_config(SEED_REPO, key, revision=SEED_REVISION)
+          print(f"warmed {SEED_REPO}@{commit}")
+          PY
+        displayName: "Warm the conformance seed component"
+        env:
+          HF_TOKEN: $(HF_MCP_TOKEN_RW)
+
+      - bash: |
+          set -e
           nvidia-smi
           python -c "import torch; assert torch.cuda.is_available(), 'no CUDA device visible to this job'"
           echo "visible devices: $(python -c 'import torch; print(torch.cuda.device_count())')"
@@ -240,6 +263,11 @@ jobs:
             exit 1
           fi
         displayName: "Test (GPU)"
+        env:
+          # Approved: the conformance seed loads the Hub RTE component (interpretune inputs
+          # SEED_REPO), so this job opts into executing that pinned component's entrypoint. The warm
+          # step above only fetches; without this the suite refuses every seed-backed case by name.
+          IT_TRUST_REMOTE_CODE: "1"
 
       # WORKSPACE OWNERSHIP, and it must run INSIDE the container, where this uid can still write.
       # Under rootless docker with userns remapping, everything this job writes into the mapped
