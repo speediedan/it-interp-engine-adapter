@@ -263,6 +263,11 @@ jobs:
             exit 1
           fi
         displayName: "Test (GPU)"
+        env:
+          # Approved: the conformance seed loads the Hub RTE component (interpretune inputs
+          # SEED_REPO), so this job opts into executing that pinned component's entrypoint. The warm
+          # step above only fetches; without this the suite refuses every seed-backed case by name.
+          IT_TRUST_REMOTE_CODE: "1"
 
       # WORKSPACE OWNERSHIP, and it must run INSIDE the container, where this uid can still write.
       # Under rootless docker with userns remapping, everything this job writes into the mapped
