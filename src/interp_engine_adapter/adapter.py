@@ -1288,8 +1288,14 @@ def _circuit_tracer_pairing() -> Any:
             CircuitTracerAdapter,
             CircuitTracerAnalysisMixin,
         )
+        from interpretune.adapters.circuit_tracer.registry import CT_BACKEND_REGISTRY
     except Exception:
         return None
+    # The third-party registration interpretune's rails expect: `CircuitTracerConfig` refuses a backend
+    # name that is not in this registry, and `_load_replacement_model` validates the loaded model against
+    # the class name recorded here. circuit-tracer ships the backend (`InterpEngineReplacementModel`);
+    # this component owns the pairing, so it owns the registration. Idempotent by construction.
+    CT_BACKEND_REGISTRY.setdefault(ADAPTER_NAME, "InterpEngineReplacementModel")
 
     class CircuitTracerInterpEngineModuleMixin(InterpEngineAttributeMixin):
         """The pairing-specific layer, and the reason it exists is a refusal rather than a feature.
@@ -1312,8 +1318,40 @@ def _circuit_tracer_pairing() -> Any:
 
         def post_auto_model_init(self, *args: Any, **kwargs: Any) -> Any:
             result = super().post_auto_model_init(*args, **kwargs)  # type: ignore[misc]
+            self._load_interp_engine_replacement_model()
             self._guard_feature_hook_resolution()
             return result
+
+        def _load_interp_engine_replacement_model(self) -> None:
+            """Load circuit-tracer's replacement model over the engine, so attribution can run.
+
+            The bundled pairings do this from their TL and nnsight mixins, handing circuit-tracer the HF
+            model the module already loaded through ``pretrained_kwargs``. This pairing had no such call,
+            so ``replacement_model`` stayed ``None`` and every attribution-driven op failed at first use
+            (measured: `'NoneType' object has no attribute 'tokenizer'` at session setup).
+
+            ONE SET OF WEIGHTS, TWO ENGINES OVER IT. The adapter's engine (built by the base hook above)
+            drives steering; circuit-tracer builds its own ``EagerModel`` over the SAME ``hf_model`` for
+            attribution, with ``requires_grad`` and the frozen-attention implementation it needs. Both
+            wrap in place without owning the module, and circuit-tracer's replay taps are installed only
+            inside its attribution contexts, so outside those contexts the shared model is the one the
+            adapter's engine steers.
+            """
+            cfg = getattr(self, "circuit_tracer_cfg", None)
+            if cfg is None:
+                return
+            if cfg.backend != ADAPTER_NAME:
+                raise UnmappableHookError(
+                    f"the (core, interp_engine, circuit_tracer) composition runs circuit-tracer over the "
+                    f"engine, so circuit_tracer_cfg.backend must be {ADAPTER_NAME!r}; got {cfg.backend!r}. "
+                    "Pick the bundled pairing for that backend instead of this component."
+                )
+            tokenizer = getattr(getattr(self, "_engine_model", None), "tokenizer", None)
+            if tokenizer is None:
+                tokenizer = getattr(self.model, "tokenizer", None)  # type: ignore[attr-defined]
+            self._load_replacement_model(  # type: ignore[attr-defined]
+                pretrained_kwargs={"hf_model": self.model, "tokenizer": tokenizer}  # type: ignore[attr-defined]
+            )
 
         def _guard_feature_hook_resolution(self) -> None:
             """Route circuit-tracer's hook resolution through this adapter's seam first.
