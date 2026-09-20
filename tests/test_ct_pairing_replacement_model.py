@@ -82,6 +82,21 @@ def test_the_pairing_hook_loads_the_replacement_model_over_the_loaded_hf_model_a
 
 
 @requires_ct
+def test_the_pairing_chains_through_the_engine_wrapping_hook():
+    """The engine-wrapping `post_auto_model_init` (capture mixin) must sit in the pairing's MRO between the pairing
+    mixin and the base, or the composition never gets an engine or a model backend."""
+    pairing = adapter_mod._circuit_tracer_pairing()
+    mro = [c.__name__ for c in pairing.__mro__]
+    assert (
+        mro.index("CircuitTracerInterpEngineModuleMixin")
+        < mro.index("InterpEngineCaptureMixin")
+        < mro.index("BaseITModule")
+    )
+    owners = [c.__name__ for c in pairing.__mro__ if "post_auto_model_init" in c.__dict__]
+    assert owners[:2] == ["CircuitTracerInterpEngineModuleMixin", "InterpEngineCaptureMixin"], owners
+
+
+@requires_ct
 def test_a_foreign_backend_name_is_refused_by_name():
     pairing = adapter_mod._circuit_tracer_pairing()
 

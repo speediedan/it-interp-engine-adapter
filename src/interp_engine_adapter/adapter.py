@@ -1334,7 +1334,13 @@ def _circuit_tracer_pairing() -> Any:
     # this component owns the pairing, so it owns the registration. Idempotent by construction.
     CT_BACKEND_REGISTRY.setdefault(ADAPTER_NAME, "InterpEngineReplacementModel")
 
-    class CircuitTracerInterpEngineModuleMixin(InterpEngineAttributeMixin):
+    class CircuitTracerInterpEngineModuleMixin(InterpEngineCaptureMixin):
+        # `InterpEngineCaptureMixin`, not the attribute-only mixin: the capture mixin owns the
+        # `post_auto_model_init` that wraps the engine and attaches this adapter's model backend, and
+        # the two-way module inherits it. This pairing inherited only the attribute mixin, so the chain
+        # from its own hook skipped the engine entirely: no engine, no model backend, and every steering
+        # op would have failed on this composition before any attribution ran (measured: the module had
+        # no `_engine_model` after init). Engine first, replacement model second, both over one HF model.
         """The pairing-specific layer, and the reason it exists is a refusal rather than a feature.
 
         Circuit-tracer resolves a transcoder set's TransformerLens hook names through
