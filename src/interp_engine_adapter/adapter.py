@@ -1271,6 +1271,14 @@ def _datamodule_classes(combination: tuple[Any, ...]) -> tuple[Any, ...]:
 _CT_PAIRING: Any = None
 
 
+def _hf_model_device(model: Any) -> Any:
+    """The device a loaded HF model's parameters live on (``None`` when it has none to read)."""
+    try:
+        return next(model.parameters()).device
+    except (AttributeError, StopIteration):
+        return None
+
+
 def _circuit_tracer_pairing() -> Any:
     """The ``(core, interp_engine, circuit_tracer)`` module class, or ``None`` where unavailable.
 
@@ -1349,8 +1357,14 @@ def _circuit_tracer_pairing() -> Any:
             tokenizer = getattr(getattr(self, "_engine_model", None), "tokenizer", None)
             if tokenizer is None:
                 tokenizer = getattr(self.model, "tokenizer", None)  # type: ignore[attr-defined]
+            # THE HF MODEL'S CURRENT DEVICE, not circuit-tracer's default. At this hook the module's model
+            # is still where interpretune loaded it (CPU in a real session; the move to the accelerator
+            # comes later and carries the replacement model along, since it is an ``nn.Module`` holding the
+            # transcoders). Left to its default, circuit-tracer loads the transcoders on CUDA and its
+            # configuration forward fails on the first splice with tensors on two devices (measured).
+            device = _hf_model_device(self.model)  # type: ignore[attr-defined]
             self._load_replacement_model(  # type: ignore[attr-defined]
-                pretrained_kwargs={"hf_model": self.model, "tokenizer": tokenizer}  # type: ignore[attr-defined]
+                pretrained_kwargs={"hf_model": self.model, "tokenizer": tokenizer, "device": device}  # type: ignore[attr-defined]
             )
 
         def _guard_feature_hook_resolution(self) -> None:

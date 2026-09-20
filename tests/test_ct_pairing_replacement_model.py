@@ -41,6 +41,9 @@ def test_the_pairing_hook_loads_the_replacement_model_over_the_loaded_hf_model_a
     class _HF:
         tokenizer = "tok-from-hf"
 
+        def parameters(self):
+            yield type("P", (), {"device": "cpu-probe"})()
+
     class _Probe(pairing):  # type: ignore[misc, valid-type]
         # `circuit_tracer_cfg` is a read-only property on the base module; the probe overrides it.
         circuit_tracer_cfg = property(lambda self: type("Cfg", (), {"backend": adapter_mod.ADAPTER_NAME})())
@@ -58,7 +61,8 @@ def test_the_pairing_hook_loads_the_replacement_model_over_the_loaded_hf_model_a
     probe._load_interp_engine_replacement_model()
     probe._guard_feature_hook_resolution()
 
-    assert calls == [{"hf_model": probe.model, "tokenizer": "tok-from-engine"}]
+    # Device is the HF model's own, read from its parameters, not circuit-tracer's default accelerator.
+    assert calls == [{"hf_model": probe.model, "tokenizer": "tok-from-engine", "device": "cpu-probe"}]
     guarded = probe._replacement_model._resolve_feature_hook
     assert getattr(guarded, "_it_seam_guarded", False), "the seam guard did not arm on the loaded model"
     # The guard takes the BARE hook name circuit-tracer resolves (no `blocks.N.` prefix).
