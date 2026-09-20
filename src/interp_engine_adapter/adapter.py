@@ -1271,6 +1271,43 @@ def _datamodule_classes(combination: tuple[Any, ...]) -> tuple[Any, ...]:
 _CT_PAIRING: Any = None
 
 
+def _hf_model_device(model: Any) -> Any:
+    """The device a loaded HF model's parameters live on (``None`` when it has none to read)."""
+    try:
+        return next(model.parameters()).device
+    except (AttributeError, StopIteration):
+        return None
+
+
+def _hf_model_dtype(model: Any) -> Any:
+    """The dtype a loaded HF model's parameters carry (``None`` when it has none to read)."""
+    try:
+        return next(model.parameters()).dtype
+    except (AttributeError, StopIteration):
+        return None
+
+
+def _expose_hf_surface(replacement_model: Any) -> None:
+    """Give circuit-tracer's interp-engine replacement model the HF surface interpretune reads off
+    ``module.model``.
+
+    Interpretune's core treats ``module.model`` as an HF model: hyperparameter capture reads ``.config``,
+    the dims mixin reads ``.base_model`` and ``.config.vocab_size``, generation reads ``.generation_config``.
+    The bundled replacement models carry those (nnsight's proxies its ``LanguageModel``); the interp-engine
+    one keeps them on ``hf_model`` and exposes none. Attached as PLAIN attributes via ``object.__setattr__``,
+    deliberately: ``nn.Module.__setattr__`` would register ``base_model`` as a submodule and double-count
+    every parameter in ``parameters()`` and the state dict. Instance ``__dict__`` wins over ``nn.Module``'s
+    ``__getattr__``, so reads resolve without registration. The clean home for this is circuit-tracer
+    itself (properties on ``InterpEngineReplacementModel``); until then this pairing owns the shim.
+    """
+    hf_model = getattr(replacement_model, "hf_model", None)
+    if hf_model is None:
+        return
+    for name in ("config", "generation_config", "base_model"):
+        if not hasattr(replacement_model, name) and hasattr(hf_model, name):
+            object.__setattr__(replacement_model, name, getattr(hf_model, name))
+
+
 def _circuit_tracer_pairing() -> Any:
     """The ``(core, interp_engine, circuit_tracer)`` module class, or ``None`` where unavailable.
 
@@ -1288,10 +1325,22 @@ def _circuit_tracer_pairing() -> Any:
             CircuitTracerAdapter,
             CircuitTracerAnalysisMixin,
         )
+        from interpretune.adapters.circuit_tracer.registry import CT_BACKEND_REGISTRY
     except Exception:
         return None
+    # The third-party registration interpretune's rails expect: `CircuitTracerConfig` refuses a backend
+    # name that is not in this registry, and `_load_replacement_model` validates the loaded model against
+    # the class name recorded here. circuit-tracer ships the backend (`InterpEngineReplacementModel`);
+    # this component owns the pairing, so it owns the registration. Idempotent by construction.
+    CT_BACKEND_REGISTRY.setdefault(ADAPTER_NAME, "InterpEngineReplacementModel")
 
-    class CircuitTracerInterpEngineModuleMixin(InterpEngineAttributeMixin):
+    class CircuitTracerInterpEngineModuleMixin(InterpEngineCaptureMixin):
+        # `InterpEngineCaptureMixin`, not the attribute-only mixin: the capture mixin owns the
+        # `post_auto_model_init` that wraps the engine and attaches this adapter's model backend, and
+        # the two-way module inherits it. This pairing inherited only the attribute mixin, so the chain
+        # from its own hook skipped the engine entirely: no engine, no model backend, and every steering
+        # op would have failed on this composition before any attribution ran (measured: the module had
+        # no `_engine_model` after init). Engine first, replacement model second, both over one HF model.
         """The pairing-specific layer, and the reason it exists is a refusal rather than a feature.
 
         Circuit-tracer resolves a transcoder set's TransformerLens hook names through
@@ -1312,8 +1361,56 @@ def _circuit_tracer_pairing() -> Any:
 
         def post_auto_model_init(self, *args: Any, **kwargs: Any) -> Any:
             result = super().post_auto_model_init(*args, **kwargs)  # type: ignore[misc]
+            self._load_interp_engine_replacement_model()
             self._guard_feature_hook_resolution()
             return result
+
+        def _load_interp_engine_replacement_model(self) -> None:
+            """Load circuit-tracer's replacement model over the engine, so attribution can run.
+
+            The bundled pairings do this from their TL and nnsight mixins, handing circuit-tracer the HF
+            model the module already loaded through ``pretrained_kwargs``. This pairing had no such call,
+            so ``replacement_model`` stayed ``None`` and every attribution-driven op failed at first use
+            (measured: `'NoneType' object has no attribute 'tokenizer'` at session setup).
+
+            ONE SET OF WEIGHTS, TWO ENGINES OVER IT. The adapter's engine (built by the base hook above)
+            drives steering; circuit-tracer builds its own ``EagerModel`` over the SAME ``hf_model`` for
+            attribution, with ``requires_grad`` and the frozen-attention implementation it needs. Both
+            wrap in place without owning the module, and circuit-tracer's replay taps are installed only
+            inside its attribution contexts, so outside those contexts the shared model is the one the
+            adapter's engine steers.
+            """
+            cfg = getattr(self, "circuit_tracer_cfg", None)
+            if cfg is None:
+                return
+            if cfg.backend != ADAPTER_NAME:
+                raise UnmappableHookError(
+                    f"the (core, interp_engine, circuit_tracer) composition runs circuit-tracer over the "
+                    f"engine, so circuit_tracer_cfg.backend must be {ADAPTER_NAME!r}; got {cfg.backend!r}. "
+                    "Pick the bundled pairing for that backend instead of this component."
+                )
+            tokenizer = getattr(getattr(self, "_engine_model", None), "tokenizer", None)
+            if tokenizer is None:
+                tokenizer = getattr(self.model, "tokenizer", None)  # type: ignore[attr-defined]
+            # THE HF MODEL'S CURRENT DEVICE, not circuit-tracer's default. At this hook the module's model
+            # is still where interpretune loaded it (CPU in a real session; the move to the accelerator
+            # comes later and carries the replacement model along, since it is an ``nn.Module`` holding the
+            # transcoders). Left to its default, circuit-tracer loads the transcoders on CUDA and its
+            # configuration forward fails on the first splice with tensors on two devices (measured).
+            device = _hf_model_device(self.model)  # type: ignore[attr-defined]
+            # THE HF MODEL'S DTYPE TOO. `CircuitTracerConfig.dtype` defaults to bfloat16 and sizes the
+            # transcoders; the module loads its model at whatever its own config says (float32 in the
+            # seed configs). The bundled pairings never meet this because circuit-tracer loads a fresh
+            # model at the config dtype; here one set of weights serves both engines, so the transcoders
+            # must match the weights that exist. Measured on the first pass: `float != BFloat16` at the
+            # first transcoder splice. Realigned on the config so the recorded dtype is the one used.
+            hf_dtype = _hf_model_dtype(self.model)  # type: ignore[attr-defined]
+            if hf_dtype is not None and cfg.dtype != hf_dtype:
+                cfg.dtype = hf_dtype
+            self._load_replacement_model(  # type: ignore[attr-defined]
+                pretrained_kwargs={"hf_model": self.model, "tokenizer": tokenizer, "device": device}  # type: ignore[attr-defined]
+            )
+            _expose_hf_surface(self._replacement_model)  # type: ignore[attr-defined]
 
         def _guard_feature_hook_resolution(self) -> None:
             """Route circuit-tracer's hook resolution through this adapter's seam first.
