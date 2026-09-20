@@ -34,7 +34,15 @@ def test_the_pairing_hook_loads_the_replacement_model_over_the_loaded_hf_model_a
         def __init__(self):
             self.resolved: list[str] = []
             self.hf_model = type(
-                "HFInner", (), {"config": "hf-config", "base_model": "hf-base", "generation_config": "gen"}
+                "HFInner",
+                (),
+                {
+                    "config": "hf-config",
+                    "base_model": "hf-base",
+                    "generation_config": "gen",
+                    "lm_head": "head",
+                    "model": "inner",
+                },
             )()
 
         def _resolve_feature_hook(self, hook: str):
@@ -73,6 +81,8 @@ def test_the_pairing_hook_loads_the_replacement_model_over_the_loaded_hf_model_a
     assert cfg.dtype == "float32-probe"
     # The HF surface interpretune reads off `module.model` is exposed from the wrapped HF model.
     assert (probe._replacement_model.config, probe._replacement_model.base_model) == ("hf-config", "hf-base")
+    # The unembed seam's paths too: the head and the inner model whose final norm it reads.
+    assert (probe._replacement_model.lm_head, probe._replacement_model.model) == ("head", "inner")
     guarded = probe._replacement_model._resolve_feature_hook
     assert getattr(guarded, "_it_seam_guarded", False), "the seam guard did not arm on the loaded model"
     # The guard takes the BARE hook name circuit-tracer resolves (no `blocks.N.` prefix).
