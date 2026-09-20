@@ -1292,7 +1292,8 @@ def _expose_hf_surface(replacement_model: Any) -> None:
     ``module.model``.
 
     Interpretune's core treats ``module.model`` as an HF model: hyperparameter capture reads ``.config``,
-    the dims mixin reads ``.base_model`` and ``.config.vocab_size``, generation reads ``.generation_config``.
+    the dims mixin reads ``.base_model`` and ``.config.vocab_size``, generation reads ``.generation_config``,
+    and the unembed seam reads ``.lm_head`` (or ``.embed_out``) and the inner ``.model``'s final norm.
     The bundled replacement models carry those (nnsight's proxies its ``LanguageModel``); the interp-engine
     one keeps them on ``hf_model`` and exposes none. Attached as PLAIN attributes via ``object.__setattr__``,
     deliberately: ``nn.Module.__setattr__`` would register ``base_model`` as a submodule and double-count
@@ -1303,7 +1304,11 @@ def _expose_hf_surface(replacement_model: Any) -> None:
     hf_model = getattr(replacement_model, "hf_model", None)
     if hf_model is None:
         return
-    for name in ("config", "generation_config", "base_model"):
+    # `lm_head` / `embed_out` and the inner `model` are what interpretune's unembed seam walks
+    # (`resolve_unembed_and_norm_scale`: the head's weight, then `.model.norm` for the final-norm scale), which
+    # the J-lens pole-pair ops call on `module.model`. Measured: the reject pair op refused with "module exposes
+    # neither an HF-style `.model.lm_head/.embed_out` nor a TransformerLens-style `.model.W_U`".
+    for name in ("config", "generation_config", "base_model", "lm_head", "embed_out", "model"):
         if not hasattr(replacement_model, name) and hasattr(hf_model, name):
             object.__setattr__(replacement_model, name, getattr(hf_model, name))
 
