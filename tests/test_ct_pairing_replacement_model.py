@@ -33,6 +33,9 @@ def test_the_pairing_hook_loads_the_replacement_model_over_the_loaded_hf_model_a
     class _Loaded:
         def __init__(self):
             self.resolved: list[str] = []
+            self.hf_model = type(
+                "HFInner", (), {"config": "hf-config", "base_model": "hf-base", "generation_config": "gen"}
+            )()
 
         def _resolve_feature_hook(self, hook: str):
             self.resolved.append(hook)
@@ -58,6 +61,7 @@ def test_the_pairing_hook_loads_the_replacement_model_over_the_loaded_hf_model_a
         def _load_replacement_model(self, pretrained_kwargs=None):
             calls.append(dict(pretrained_kwargs or {}))
             self._replacement_model = _Loaded()
+            adapter_mod._expose_hf_surface(self._replacement_model)
 
     probe = _Probe()
     probe._load_interp_engine_replacement_model()
@@ -67,6 +71,8 @@ def test_the_pairing_hook_loads_the_replacement_model_over_the_loaded_hf_model_a
     assert calls == [{"hf_model": probe.model, "tokenizer": "tok-from-engine", "device": "cpu-probe"}]
     # The config dtype is realigned to the loaded weights before the load, so the transcoders match them.
     assert cfg.dtype == "float32-probe"
+    # The HF surface interpretune reads off `module.model` is exposed from the wrapped HF model.
+    assert (probe._replacement_model.config, probe._replacement_model.base_model) == ("hf-config", "hf-base")
     guarded = probe._replacement_model._resolve_feature_hook
     assert getattr(guarded, "_it_seam_guarded", False), "the seam guard did not arm on the loaded model"
     # The guard takes the BARE hook name circuit-tracer resolves (no `blocks.N.` prefix).

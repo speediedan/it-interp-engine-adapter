@@ -1287,6 +1287,27 @@ def _hf_model_dtype(model: Any) -> Any:
         return None
 
 
+def _expose_hf_surface(replacement_model: Any) -> None:
+    """Give circuit-tracer's interp-engine replacement model the HF surface interpretune reads off
+    ``module.model``.
+
+    Interpretune's core treats ``module.model`` as an HF model: hyperparameter capture reads ``.config``,
+    the dims mixin reads ``.base_model`` and ``.config.vocab_size``, generation reads ``.generation_config``.
+    The bundled replacement models carry those (nnsight's proxies its ``LanguageModel``); the interp-engine
+    one keeps them on ``hf_model`` and exposes none. Attached as PLAIN attributes via ``object.__setattr__``,
+    deliberately: ``nn.Module.__setattr__`` would register ``base_model`` as a submodule and double-count
+    every parameter in ``parameters()`` and the state dict. Instance ``__dict__`` wins over ``nn.Module``'s
+    ``__getattr__``, so reads resolve without registration. The clean home for this is circuit-tracer
+    itself (properties on ``InterpEngineReplacementModel``); until then this pairing owns the shim.
+    """
+    hf_model = getattr(replacement_model, "hf_model", None)
+    if hf_model is None:
+        return
+    for name in ("config", "generation_config", "base_model"):
+        if not hasattr(replacement_model, name) and hasattr(hf_model, name):
+            object.__setattr__(replacement_model, name, getattr(hf_model, name))
+
+
 def _circuit_tracer_pairing() -> Any:
     """The ``(core, interp_engine, circuit_tracer)`` module class, or ``None`` where unavailable.
 
@@ -1383,6 +1404,7 @@ def _circuit_tracer_pairing() -> Any:
             self._load_replacement_model(  # type: ignore[attr-defined]
                 pretrained_kwargs={"hf_model": self.model, "tokenizer": tokenizer, "device": device}  # type: ignore[attr-defined]
             )
+            _expose_hf_surface(self._replacement_model)  # type: ignore[attr-defined]
 
         def _guard_feature_hook_resolution(self) -> None:
             """Route circuit-tracer's hook resolution through this adapter's seam first.
