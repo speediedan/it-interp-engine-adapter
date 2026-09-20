@@ -1279,6 +1279,14 @@ def _hf_model_device(model: Any) -> Any:
         return None
 
 
+def _hf_model_dtype(model: Any) -> Any:
+    """The dtype a loaded HF model's parameters carry (``None`` when it has none to read)."""
+    try:
+        return next(model.parameters()).dtype
+    except (AttributeError, StopIteration):
+        return None
+
+
 def _circuit_tracer_pairing() -> Any:
     """The ``(core, interp_engine, circuit_tracer)`` module class, or ``None`` where unavailable.
 
@@ -1363,6 +1371,15 @@ def _circuit_tracer_pairing() -> Any:
             # transcoders). Left to its default, circuit-tracer loads the transcoders on CUDA and its
             # configuration forward fails on the first splice with tensors on two devices (measured).
             device = _hf_model_device(self.model)  # type: ignore[attr-defined]
+            # THE HF MODEL'S DTYPE TOO. `CircuitTracerConfig.dtype` defaults to bfloat16 and sizes the
+            # transcoders; the module loads its model at whatever its own config says (float32 in the
+            # seed configs). The bundled pairings never meet this because circuit-tracer loads a fresh
+            # model at the config dtype; here one set of weights serves both engines, so the transcoders
+            # must match the weights that exist. Measured on the first pass: `float != BFloat16` at the
+            # first transcoder splice. Realigned on the config so the recorded dtype is the one used.
+            hf_dtype = _hf_model_dtype(self.model)  # type: ignore[attr-defined]
+            if hf_dtype is not None and cfg.dtype != hf_dtype:
+                cfg.dtype = hf_dtype
             self._load_replacement_model(  # type: ignore[attr-defined]
                 pretrained_kwargs={"hf_model": self.model, "tokenizer": tokenizer, "device": device}  # type: ignore[attr-defined]
             )

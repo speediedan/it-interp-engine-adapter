@@ -42,11 +42,13 @@ def test_the_pairing_hook_loads_the_replacement_model_over_the_loaded_hf_model_a
         tokenizer = "tok-from-hf"
 
         def parameters(self):
-            yield type("P", (), {"device": "cpu-probe"})()
+            yield type("P", (), {"device": "cpu-probe", "dtype": "float32-probe"})()
+
+    cfg = type("Cfg", (), {"backend": adapter_mod.ADAPTER_NAME, "dtype": "bfloat16-default"})()
 
     class _Probe(pairing):  # type: ignore[misc, valid-type]
         # `circuit_tracer_cfg` is a read-only property on the base module; the probe overrides it.
-        circuit_tracer_cfg = property(lambda self: type("Cfg", (), {"backend": adapter_mod.ADAPTER_NAME})())
+        circuit_tracer_cfg = property(lambda self: cfg)
 
         def __init__(self):  # no framework init: only the hook under test runs
             self.model = _HF()
@@ -63,6 +65,8 @@ def test_the_pairing_hook_loads_the_replacement_model_over_the_loaded_hf_model_a
 
     # Device is the HF model's own, read from its parameters, not circuit-tracer's default accelerator.
     assert calls == [{"hf_model": probe.model, "tokenizer": "tok-from-engine", "device": "cpu-probe"}]
+    # The config dtype is realigned to the loaded weights before the load, so the transcoders match them.
+    assert cfg.dtype == "float32-probe"
     guarded = probe._replacement_model._resolve_feature_hook
     assert getattr(guarded, "_it_seam_guarded", False), "the seam guard did not arm on the loaded model"
     # The guard takes the BARE hook name circuit-tracer resolves (no `blocks.N.` prefix).
