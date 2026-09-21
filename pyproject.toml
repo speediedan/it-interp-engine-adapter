@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Hub-delivered Interpretune adapter for interp-engine"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
-dependencies = ["interp-engine~=1.5.1"]
+dependencies = ["interp-engine~=1.11.1"]
 
 # THE FORK PIN LIVES IN THE TEST EXTRA, NOT IN `dependencies`, and that placement is the whole design.
 #
@@ -64,7 +64,7 @@ install_cell = [
     "# Uncomment to install into a fresh environment (Colab). A development install needs none of this.\n",
     "# %pip install uv\n",
     "# %uv pip install 'interpretune @ git+https://github.com/speediedan/interpretune.git@main'\n",
-    "# %uv pip install 'interp-engine~=1.5.1'\n",
+    "# %uv pip install 'interp-engine~=1.11.1'\n",
     "#\n",
     "# This adapter is NOT installed: the notebook loads it from the Hub, which is the path it exists to\n",
     "# demonstrate. `it.hub.pull` fetches it and `load_hub_adapter` executes it behind the trust gate.\n",

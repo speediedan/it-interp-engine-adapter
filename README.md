@@ -105,7 +105,7 @@ That is the answer this file is describing, and if the two ever disagree, the ba
 
 ## Requirements
 
-`interp-engine~=1.5.1`, and an Interpretune build with hub-delivered adapter support (speediedan/interpretune#125).
+`interp-engine~=1.11.1`, and an Interpretune build with hub-delivered adapter support (speediedan/interpretune#125).
 
 The pin is deliberate: interp-engine's 1.x minors change signatures without deprecation aliases, as a
 considered choice on their part. Every engine symbol is reached through one seam in the entrypoint,
