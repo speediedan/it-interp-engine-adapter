@@ -45,16 +45,17 @@ requires:
   # component was written against -- which is every contributor. Caught by loading it, 2026-08-28.
   interpretune: ">=0.1.0.dev0"
   pip:
-    # NOTE the trailing patch digit: `~=1.5` would admit 1.6, which is precisely the break this pin
-    # exists to prevent. `~=1.5.1` is >=1.5.1, ==1.5.*, so it takes 1.5.x fixes and stops at 1.6. The
-    # floor is 1.5.1 rather than 1.5.0 because 1.5.0 was already superseded when this line moved.
+    # NOTE the trailing patch digit: `~=1.11` would admit 1.12, which is precisely the break this pin
+    # exists to prevent. `~=1.11.1` is >=1.11.1, ==1.11.*, so it takes 1.11.x fixes and stops at 1.12. The
+    # floor is 1.11.1 rather than 1.11.0 because 1.11.0 was already superseded when this line moved.
     #
-    # Moved from `~=1.3.0` after validating against 1.5.1. The seam's contract tests assert against the
-    # INSTALLED engine -- STEER_METHODS membership, `EagerModel.capture`'s parameter ORDER,
+    # Moved from `~=1.5.1` after validating against 1.11.1 (interpretune#600; the 1.5 line predated the
+    # mHC point set and the hyper-connection names now in `mappers.py`). The seam's contract tests assert
+    # against the INSTALLED engine -- STEER_METHODS membership, `EagerModel.capture`'s parameter ORDER,
     # `tlens_hook_to_point` resolving model-blind, `SteerSpec` accepting a (k, d) operand -- which is
     # exactly the surface a minor bump moves, so they are the validation rather than an obstacle to it.
     #
     # This pin is the effective CEILING for circuit-tracer too, not only for this component:
     # circuit-tracer's own floor is `>=1.3.3` and admits far more, so whoever moves this line moves
     # what that package resolves as well.
-    - "interp-engine~=1.5.1"
+    - "interp-engine~=1.11.1"
