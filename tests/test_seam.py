@@ -729,12 +729,14 @@ class TestTheCircuitTracerGuardPropagatesOnlyOurOwnRefusals:
         assert issubclass(EngineHasNoPointError, UnmappableHookError)
 
 
-class TestDeprecatedSpellingsStayNameable:
-    """A spelling interpretune deprecates but still resolves must stay in this backend's inventory.
+class TestNonCanonicalSpellingsStayNameable:
+    """A spelling interpretune accepts but only leniently must stay in this backend's inventory.
 
     speediedan/interpretune#463 made `parse(name, strict=True)` refuse deprecated aliases -- `attn.hook_z`
-    among them, which resolves leniently to the `attn.o` component. `_hook_vocabulary` parses LENIENTLY,
-    deliberately, and this pins that choice against a future tightening.
+    among them, which resolves leniently to the `attn.o` component. speediedan/interpretune#612 then
+    settled those aliases as accepted vocabulary rather than deprecated spellings: strict parsing still
+    refuses them, now as `NonCanonicalPointError`. `_hook_vocabulary` parses LENIENTLY, deliberately,
+    and this pins that choice against a future tightening.
 
     WHY LENIENT IS THE RIGHT DEFAULT HERE. The inventory answers "what could a caller name?", not "what
     spelling would we recommend?". A caller whose predicate targets `attn.hook_z` is asking for a tensor
@@ -748,7 +750,7 @@ class TestDeprecatedSpellingsStayNameable:
     upstream change that caused it. Failing here instead names the spelling and this reasoning.
     """
 
-    def test_a_deprecated_but_resolvable_spelling_is_offered_and_resolves(self):
+    def test_a_lenient_only_spelling_is_offered_and_resolves(self):
         from interp_engine_adapter.adapter import _Seam, _hook_vocabulary
 
         model = _FakeEngineModel()
@@ -759,15 +761,11 @@ class TestDeprecatedSpellingsStayNameable:
         """Stated as a property of interpretune's parser, so a change upstream fails HERE by name."""
         pytest.importorskip("interpretune.analysis.points")
         from interpretune.analysis.points import parse
+        from interpretune.analysis.points.vocabulary import NonCanonicalPointError
 
         assert parse("attn.hook_z").component == "attn.o"
-        with pytest.raises(Exception) as excinfo:
+        with pytest.raises(NonCanonicalPointError, match="strict parsing accepts canonical names only"):
             parse("attn.hook_z", strict=True)
-        assert "Deprecated" in type(excinfo.value).__name__, (
-            f"expected a deprecation refusal under strict parsing, got {type(excinfo.value).__name__}. "
-            "If interpretune stopped deprecating this spelling, the lenient choice in `_hook_vocabulary` "
-            "may no longer be load-bearing and this test should be revisited rather than patched."
-        )
 
 
 class TestMeasuredAliasesAreNotTheRefusals:
