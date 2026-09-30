@@ -882,7 +882,7 @@ def _refuse_mixed_modes(targets: list[tuple[int, str, Any]]) -> None:
                 )
 
 
-def _require_expressible_operand(tensor: Any, hook_name: str) -> Any:
+def _require_expressible_operand(tensor: Any, hook_name: str, *, scope: Any = None, seq_len: int | None = None) -> Any:
     """Refuse a span operand, because the engine's projector is rank-one and additive BROADCASTS.
 
     interpretune's ``intervention_tensor`` is deliberately polymorphic: it may be ``(d_model,)`` or a
@@ -919,17 +919,37 @@ def _require_expressible_operand(tensor: Any, hook_name: str) -> Any:
     ORTHONORMAL rows (measured exact for orthonormal ``V``, wrong at row cosine -0.240). Orthonormalizing
     preserves the SPAN, so a rejection survives it, but coordinates expressed in the original basis do
     not -- so a clamp target stated in pole coordinates is not preserved by that change of basis.
+
+    THE ONE SHAPE THAT PASSES THROUGH: under ``position_scope == ALL_POSITIONS``, an operand whose
+    leading axis equals the sequence length is not a span at all -- it is a PER-POSITION delta, one
+    ``(d_model,)`` row per prompt position, which is exactly what the engine's ``additive`` applies
+    row-per-position by design (no mask is built for that scope, so nothing reinterprets the rows).
+    That is the exact two-pass J-space patch beyond the last token: capture the clean activation,
+    compute one delta row per position, add at scale 1. Anything else two-dimensional is still
+    refused by name below, including a ``(seq_len, d_model)`` operand under any other scope (a
+    single steered position takes a vector) and a ``(k, d_model)`` span whose rows are not one per
+    position (the ``k == seq_len`` corruption above, which no scope legitimises).
     """
     ndim = getattr(tensor, "ndim", None)
     if ndim is not None and ndim > 1:
         shape = tuple(getattr(tensor, "shape", ()))
+        if (
+            scope is not None
+            and scope == PositionScope.ALL_POSITIONS
+            and seq_len
+            and len(shape) == 2
+            and shape[0] == seq_len
+        ):
+            return tensor
         raise UnmappableHookError(
             f"intervention tensor for {hook_name!r} has shape {shape}: this backend takes a single "
             "direction per spec, because interp-engine's projector is rank-one. A span operand would "
             "not raise reliably -- with additive steering it broadcasts whenever the leading dimension "
             "equals the sequence length, applying a different vector per position and returning a "
             "plausible result that is not a span operation. Compose one spec per direction instead, "
-            "and note that this reproduces a span operation only for ORTHONORMAL rows."
+            "and note that this reproduces a span operation only for ORTHONORMAL rows. The one "
+            "exception is a per-position delta: under position_scope=all_positions an operand shaped "
+            "(seq_len, d_model) passes through unchanged, one row applied at each position."
         )
     return tensor
 
@@ -1746,7 +1766,7 @@ class InterpEngineModelBackend:
                 (
                     scope,
                     _Seam.steer_spec(
-                        vector=_require_expressible_operand(tensor, point),
+                        vector=_require_expressible_operand(tensor, point, scope=scope, seq_len=_prompt_length(tokens)),
                         layer=layer,
                         coeff=_coeff_for(mode_value, scale),
                         method=method,

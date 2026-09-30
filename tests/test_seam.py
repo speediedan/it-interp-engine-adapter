@@ -13,6 +13,8 @@ import contextlib
 import pathlib
 
 import pytest
+import torch
+from interpretune.analysis.backends.capabilities import PositionScope
 
 # INTERNALS COME FROM `.adapter`, NOT FROM THE PACKAGE, and the distinction is load-bearing rather than
 # stylistic. `adapter.py` is the file the hub loader executes by path out of the snapshot; the package
@@ -26,6 +28,7 @@ from interp_engine_adapter.adapter import (
     InterpEngineModule,
     UnmappableHookError,
     _Seam,
+    _require_expressible_operand,
 )
 
 
@@ -1858,3 +1861,34 @@ class TestADroppedEngineConfigIsRefused:
             "a supplied config must be handed back unchanged; returning an equal-but-distinct object "
             "would hide a substitution just as a default did"
         )
+
+
+class TestPerPositionAddOperand:
+    """Adapter#39: under all_positions, a (seq_len, d_model) operand is a per-position delta.
+
+    The engine's ``additive`` applies one row per position by design when no position mask is built
+    (the ALL_POSITIONS case), so passing the operand through unchanged is exact -- it is the two-pass
+    J-space patch beyond the last token. Every other two-dimensional shape stays refused, because the
+    ``k == seq_len`` broadcast corruption the guard documents is not legitimised by any scope.
+    """
+
+    def test_seq_by_d_passes_through_under_all_positions(self):
+        """Two positions, two distinct deltas: the object returned is the object handed over."""
+        tensor = torch.tensor([[1.0, 0.0], [0.0, 2.0]])
+        assert _require_expressible_operand(tensor, "mlp_in", scope=PositionScope.ALL_POSITIONS, seq_len=2) is tensor
+
+    def test_span_whose_rows_are_not_one_per_position_is_refused(self):
+        """A (3, d) operand at 2 positions is the span confusion, not a per-position delta."""
+        with pytest.raises(UnmappableHookError) as excinfo:
+            _require_expressible_operand(torch.zeros(3, 8), "mlp_in", scope=PositionScope.ALL_POSITIONS, seq_len=2)
+        assert "per-position" in str(excinfo.value)
+
+    def test_seq_by_d_is_refused_under_last_token(self):
+        """One steered position takes a vector; a (seq, d) operand there is meaningless."""
+        with pytest.raises(UnmappableHookError):
+            _require_expressible_operand(torch.zeros(2, 8), "mlp_in", scope=PositionScope.LAST_TOKEN, seq_len=2)
+
+    def test_vector_is_untouched(self):
+        """The pre-existing contract: one-dimensional operands pass whatever the scope."""
+        tensor = torch.zeros(8)
+        assert _require_expressible_operand(tensor, "mlp_in", scope=PositionScope.ALL_POSITIONS, seq_len=2) is tensor
