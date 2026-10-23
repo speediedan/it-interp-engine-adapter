@@ -62,6 +62,11 @@ jobs:
 
     pool:
       name: default
+      # Interim, until the AMD agent is admitted to the any-vendor class: this job's image and device
+      # options are CUDA-only, so it demands an NVIDIA agent. GPU_VENDOR comes from each agent's .env
+      # (a system capability); a job whose demand no agent carries fails at queue time (interpretune #703).
+      demands:
+        - GPU_VENDOR -equals nvidia
 
     # CONTAINER, and specifically interpretune's image, for three reasons rather than convention:
     #   1. The agent host's default `python3` is 3.10, below this project's `requires-python = ">=3.11"`.
