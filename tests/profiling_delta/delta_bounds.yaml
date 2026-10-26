@@ -1,0 +1,7 @@
+# Frozen memory-delta bounds: per vendor, per composition, per gated metric, the accepted baseline
+# (interpretune-minus-upstream median, bytes) and the tolerance around it (bytes). Nothing is frozen yet:
+# bounds are frozen only from spread measured on BOTH vendors, and neither pair has an AMD measurement.
+# Until then both pairs are report-only (measured and printed, never gated). The recorded NVIDIA medians
+# live in the PR that introduced the pairs.
+cuda: {}
+rocm: {}
