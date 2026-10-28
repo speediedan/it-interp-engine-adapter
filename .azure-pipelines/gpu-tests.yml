@@ -141,6 +141,9 @@ jobs:
           # than being masked by a pin here, which is the outcome worth having.
           uv pip install -e ".[test]" \
             "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main"
+          # finetuning-scheduler as interpretune pins it: the tuning conformance (#48) needs its views, which no
+          # release carries yet. Derived, never copied; `scripts/interpretune_git_pin.py` says when this goes.
+          uv pip install "$(python scripts/interpretune_git_pin.py finetuning-scheduler)"
           #
           # CIRCUIT-TRACER, DERIVED FROM INTERPRETUNE'S OWN PIN RATHER THAN RESTATED HERE.
           #

@@ -41,6 +41,9 @@ jobs:
           # than being masked by a pin here, which is the outcome worth having.
           uv pip install --system --torch-backend=cpu -e ".[test]" \
             "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main"
+          # finetuning-scheduler as interpretune pins it: the tuning conformance (#48) needs its views, which no
+          # release carries yet. Derived, never copied; `scripts/interpretune_git_pin.py` says when this goes.
+          uv pip install --system --torch-backend=cpu "$(python scripts/interpretune_git_pin.py finetuning-scheduler)"
           # WHICH interpretune did this resolve? `@main` MOVES, so a green here is a statement about a
           # commit nobody wrote down, and the gap is invisible until someone needs the answer. Measured:
           # reconstructing it after the fact IS possible, because the setuptools-scm version string encodes
@@ -209,6 +212,9 @@ jobs:
           python -m pip install --upgrade pip uv
           uv pip install --system -e ".[test]" \
             "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main"
+          # finetuning-scheduler as interpretune pins it: the tuning conformance (#48) needs its views, which no
+          # release carries yet. Derived, never copied; `scripts/interpretune_git_pin.py` says when this goes.
+          uv pip install --system "$(python scripts/interpretune_git_pin.py finetuning-scheduler)"
           # WHICH interpretune did this resolve? This leg resolves `@main` independently of the other
           # jobs, and it is the slowest and most awkward to reproduce, so a failure here is the one most
           # likely to be read months later from the log alone. A version string cannot answer it.
