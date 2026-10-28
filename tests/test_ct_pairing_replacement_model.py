@@ -128,6 +128,7 @@ def test_the_pairing_declares_circuit_tracers_tunable_view():
     pairing inherits that declaration from ``BaseCircuitTracerModule`` rather than overriding it, and with no
     replacement model loaded the view refuses the composition.
     """
+    pytest.importorskip("finetuning_scheduler.tunable_view", reason="finetuning-scheduler predates the view")
     from interpretune.adapters.circuit_tracer.adapter import BaseCircuitTracerModule
     from interpretune.tuning.views import RefusingView
 
