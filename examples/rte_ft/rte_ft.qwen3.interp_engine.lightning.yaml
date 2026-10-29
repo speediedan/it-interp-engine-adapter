@@ -1,0 +1,41 @@
+# `rte_ft.qwen3.interp_engine.core.yaml` on the Lightning interface: the same session on `(lightning, interp_engine)`,
+# with finetuning-scheduler's `FinetuningScheduler`, `FTSEarlyStopping` and `FTSCheckpoint`:
+#
+#   IT_TRUST_REMOTE_CODE=1 interpretune fit --lightning_cli --config rte_ft.qwen3.interp_engine.lightning.yaml
+hub_adapters:
+  - speediedan/it-interp-engine-adapter@2aff684002ad
+session_ref: speediedan/rte:rte_ft.qwen3.core
+adapter_ctx:
+  - lightning
+  - interp_engine
+registered_cfg:
+  module_cfg:
+    init_args:
+      auto_comp_cfg:
+        init_args:
+          target_adapters: interp_engine
+      interp_engine_cfg:
+        class_path: it_hub_adapters.speediedan__it_interp_engine_adapter.InterpEngineConfig
+seed_everything: 0
+trainer:
+  accelerator: gpu
+  devices: 1
+  max_epochs: 10
+  num_sanity_val_steps: 0
+  logger: false
+  enable_progress_bar: false
+  callbacks:
+    - class_path: finetuning_scheduler.FinetuningScheduler
+      init_args:
+        ft_schedule: hub://speediedan/rte/ft_schedules/rte_ft.qwen3.core.yaml
+        max_depth: -1
+    - class_path: finetuning_scheduler.FTSEarlyStopping
+      init_args:
+        monitor: val_loss
+        patience: 1
+        min_delta: 0.001
+    - class_path: finetuning_scheduler.FTSCheckpoint
+      init_args:
+        dirpath: checkpoints/rte_ft.qwen3.interp_engine.lightning
+        monitor: val_loss
+        save_top_k: 1

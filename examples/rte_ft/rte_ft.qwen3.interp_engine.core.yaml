@@ -1,0 +1,48 @@
+# Phased fine-tuning (finetuning-scheduler) of Qwen3-0.6B on RTE through interp-engine, steered first
+# (speediedan/interpretune#812), fp32 on one 24 GB GPU, on interpretune's core loop:
+#
+#   IT_TRUST_REMOTE_CODE=1 interpretune --run_command train --config rte_ft.qwen3.interp_engine.core.yaml
+#
+# The session is `speediedan/rte`'s `rte_ft.qwen3.core` configuration on the `(core, interp_engine)` composition:
+# `hub_adapters` loads this adapter at a pinned Hub revision before the configuration is parsed
+# (speediedan/interpretune#872), and the module configuration composes the task's config with the adapter's
+# `ITInterpEngineConfig`. interp-engine wraps the HF model in place, so the steering vector sits on
+# `model.model.layers.13` and the component's schedule (`ft_schedules/rte_ft.qwen3.core.yaml`) applies unchanged: the
+# steering vector, then the top layers and the final norm, then the middle layers. `FTSCoreCallback` drives
+# finetuning-scheduler's `TuningScheduler`: a phase advances on a validation-loss plateau (or at its
+# `max_transition_epoch`), and the best checkpoint by validation loss is kept.
+# `rte_ft.qwen3.interp_engine.lightning.yaml` is the same run on the Lightning interface.
+hub_adapters:
+  - speediedan/it-interp-engine-adapter@2aff684002ad
+session_ref: speediedan/rte:rte_ft.qwen3.core
+adapter_ctx:
+  - core
+  - interp_engine
+registered_cfg:
+  module_cfg:
+    init_args:
+      auto_comp_cfg:
+        init_args:
+          target_adapters: interp_engine
+      interp_engine_cfg:
+        class_path: it_hub_adapters.speediedan__it_interp_engine_adapter.InterpEngineConfig
+seed_everything: 0
+run_cfg:
+  max_epochs: 10
+  callbacks:
+    - class_path: interpretune.tuning.core_loop.FTSCoreCallback
+      init_args:
+        schedule: hub://speediedan/rte/ft_schedules/rte_ft.qwen3.core.yaml
+        tuning_scheduler_kwargs:
+          max_depth: -1
+          transition:
+            class_path: finetuning_scheduler.core.transitions.PlateauTransition
+            init_args:
+              monitor: val_loss
+              patience: 1
+              min_delta: 0.001
+          checkpoint:
+            class_path: finetuning_scheduler.core.checkpoint.BestCheckpoint
+            init_args:
+              dirpath: checkpoints/rte_ft.qwen3.interp_engine.core
+              monitor: val_loss
