@@ -1153,7 +1153,7 @@ class TestRejectMapping:
         from interp_engine_adapter.adapter import _MODE_REFUSAL_REASONS, _MODE_TO_STEER_METHOD
 
         assert set(_MODE_TO_STEER_METHOD) == {"add", "reject", "clamp"}
-        assert set(_MODE_REFUSAL_REASONS) == {"replace", "patch", "project"}
+        assert set(_MODE_REFUSAL_REASONS) == {"replace", "patch", "project", "scale"}
 
 
 class TestClampMapping:

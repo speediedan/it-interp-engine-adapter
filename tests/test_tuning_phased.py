@@ -20,7 +20,12 @@ import pytest
 import torch
 
 pytest.importorskip("interpretune.tuning.interventions", reason="needs interpretune's interventions seam (#812)")
-pytest.importorskip("finetuning_scheduler.tunable_view", reason="finetuning-scheduler predates the view")
+# interpretune's own check, not a module of finetuning-scheduler's: `finetuning_scheduler.tunable_view` moved to
+# venngram, and an import guard naming the old module would skip this test silently on every current install.
+from interpretune.tuning.views import fts_views_available  # noqa: E402
+
+if not fts_views_available():
+    pytest.skip("interpretune's tunable views are unavailable on this install", allow_module_level=True)
 
 from interpretune.testing.conformance import ConformanceInputs  # noqa: E402
 

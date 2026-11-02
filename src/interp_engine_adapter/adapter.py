@@ -718,6 +718,10 @@ _MODE_REFUSAL_REASONS = {
         "the complementary projection of the engine's ``orthogonal``: it keeps the parallel "
         "component where ``orthogonal`` keeps the orthogonal one, so no coefficient converts"
     ),
+    "scale": (
+        "an elementwise product rescales every coordinate of the activation, while every engine "
+        "steering method acts on the component along one direction and leaves the complement untouched"
+    ),
 }
 
 
