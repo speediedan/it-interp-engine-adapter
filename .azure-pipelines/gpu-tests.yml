@@ -139,8 +139,26 @@ jobs:
           # which is why the pair had to be dropped together and why no in-repo env could reveal it.
           # If a future interpretune reintroduces an undeclared import, this job fails at import rather
           # than being masked by a pin here, which is the outcome worth having.
+          #
+          # VENNGRAM IS REQUIRED BY interpretune AND IS ON NO INDEX YET. interpretune's base `dependencies` name
+          # `venngram>=0.1.0.dev0`, which resolves only from git, and its git pin lives in its dependency groups,
+          # which a git install does not carry (as with circuit-tracer below). Read it the same way, from the
+          # interpretune `main` this job installs, so the two cannot drift. Delete this once venngram is on PyPI.
+          VG_REQ=$(python - <<'PY'
+          import tomllib, urllib.request, sys
+          url = "https://raw.githubusercontent.com/speediedan/interpretune/main/pyproject.toml"
+          data = tomllib.loads(urllib.request.urlopen(url, timeout=30).read().decode())
+          entries = sorted({e for g in data.get("dependency-groups", {}).values()
+                            for e in g if isinstance(e, str) and e.startswith("venngram @")})
+          if len(entries) != 1:
+              sys.exit(f"expected exactly one venngram pin in interpretune's dependency-groups, "
+                       f"found {len(entries)}: {entries}")
+          print(entries[0])
+          PY
+          )
+          echo "venngram: ${VG_REQ}"
           uv pip install -e ".[test]" \
-            "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main"
+            "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main" "${VG_REQ}"
           #
           # CIRCUIT-TRACER, DERIVED FROM INTERPRETUNE'S OWN PIN RATHER THAN RESTATED HERE.
           #
