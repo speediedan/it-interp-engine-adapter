@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pathlib
 import shutil
+import sys
 
 import pytest
 import yaml
@@ -31,6 +32,33 @@ SCHEDULE = {
     0: {"params": [r"model.transformer.ln_f.*", r"model.transformer.h.(10|11)\..*"], "max_transition_epoch": 1},
     1: {"params": [r"model.transformer.h.[6-9]\..*"], "lr": 3.0e-05},
 }
+
+
+@pytest.fixture(autouse=True)
+def restore_adapter_registration():
+    """Undo the run's hub load, so later tests can register their own copy of this adapter.
+
+    The run loads this checkout as a locally published revision, which defines a second ``ITInterpEngineConfig`` and
+    registers it for ``interp_engine``. interpretune refuses a second config class for one adapter, so leaving it
+    registered fails every later test that stages the component (``test_conformance.load_component``).
+    """
+    from interpretune.adapters import ADAPTER_REGISTRY
+
+    registry = ADAPTER_REGISTRY.registry  # the populated ``CompositionRegistry`` behind the lazy wrapper
+    compositions = dict(registry)
+    cfg_classes = dict(registry._module_cfg_classes)
+    loaded = dict(hub_adapters._LOADED_HUB_ADAPTERS)
+    modules = set(sys.modules)
+    yield
+    registry.clear()
+    registry.update(compositions)
+    registry._module_cfg_classes.clear()
+    registry._module_cfg_classes.update(cfg_classes)
+    hub_adapters._LOADED_HUB_ADAPTERS.clear()
+    hub_adapters._LOADED_HUB_ADAPTERS.update(loaded)
+    for name in set(sys.modules) - modules:
+        if name == hub_adapters.HUB_ADAPTER_PACKAGE or name.startswith(f"{hub_adapters.HUB_ADAPTER_PACKAGE}."):
+            del sys.modules[name]
 
 
 @pytest.fixture()

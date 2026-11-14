@@ -32,6 +32,8 @@ from interpretune.testing.conformance import ConformanceInputs  # noqa: E402
 from test_conformance import COMPOSITION, load_component  # noqa: E402
 
 SITE = "model.transformer.h.5"
+# the steering vector is an `add` OpIntervention; its learned direction is the operand's tensor
+STEER = "interventions.steer.operand.value"
 SCHEDULE = {
     0: {"params": ["role:intervention:steer"], "max_transition_epoch": 1},
     1: {"params": [r"model\.transformer\.h\.1[01]\..*"]},
@@ -74,7 +76,7 @@ def test_a_steered_phased_run_changes_only_what_each_phase_schedules(steered_mod
     module = steered_module
     model = module.model
     device = next(model.parameters()).device
-    assert module.interventions["steer"].vector.device == device
+    assert module.interventions["steer"].operand.value.device == device
     torch.manual_seed(0)
     ids = torch.randint(0, model.config.vocab_size, (4, 16), device=device)
 
@@ -98,10 +100,10 @@ def test_a_steered_phased_run_changes_only_what_each_phase_schedules(steered_mod
             losses.append(loss.item())
         changed = {n for n, p in names.items() if not torch.equal(snapshot[n], p.detach())}
         if depth == 0:
-            assert changed == {"interventions.steer.vector"}, sorted(changed - {"interventions.steer.vector"})[:5]
+            assert changed == {STEER}, sorted(changed - {STEER})[:5]
         fts.epoch_end({})
 
-    assert thawed[0] == ["interventions.steer.vector"]
-    assert thawed[1] == sorted(["interventions.steer.vector", *block])
-    assert changed == {"interventions.steer.vector", *block}
+    assert thawed[0] == [STEER]
+    assert thawed[1] == sorted([STEER, *block])
+    assert changed == {STEER, *block}
     assert losses[-1] < losses[0]

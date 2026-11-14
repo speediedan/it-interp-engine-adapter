@@ -120,6 +120,7 @@ def test_a_foreign_backend_name_is_refused_by_name():
         _Probe()._load_interp_engine_replacement_model()
 
 
+@requires_ct
 def test_the_pairing_declares_circuit_tracers_tunable_view():
     """The pairing tunes through interpretune's circuit-tracer view, not the identity default (#48).
 
