@@ -29,8 +29,7 @@ from typing import Any
 
 from interpretune.adapters.registration import CompositionRegistry
 from interpretune.analysis.backends.capabilities import (
-    ModelBackendCapability,
-    InterventionMode,
+    Capability,
     InterventionSupport,
     PositionScope,
     get_model_backend,
@@ -341,10 +340,10 @@ class _Seam:
         and a ``reject`` split across scopes at one point do NOT commute -- rejecting after adding
         differs from adding after rejecting, while nested per-scope contexts fire in an order that
         is unmeasured relative to declaration order -- so that mixture is refused by name in
-        ``fwd_w_intervention`` (see ``_refuse_mixed_modes``). Within one scope, declaration order
-        flows through untouched. A future mode that overwrites rather than accumulates (``replace``
-        is the obvious one) extends the same refusal. `_MODE_TO_STEER_METHOD` declares the mapped
-        modes, and `intervention_support` is asserted to agree with it.
+        ``fwd_w_intervention`` (see ``_refuse_mixed_ops``). Within one scope, declaration order
+        flows through untouched. A future op that overwrites rather than accumulates (``replace``
+        is the obvious one) extends the same refusal. `_OP_TO_STEER_METHOD` declares the mapped
+        ops, and `intervention_support` is asserted to agree with it.
         """
         from interp_engine import run_with_cache, steer
         from contextlib import ExitStack
@@ -641,7 +640,7 @@ def _names_filter_to_list(names_filter: Any, engine_model: Any) -> list[str]:
     return list(names_filter)
 
 
-#: interpretune ``InterventionSpec.mode`` -> interp-engine ``SteerSpec.method``, for the modes whose
+#: interpretune ``InterventionSpec.op`` -> interp-engine ``SteerSpec.method``, for the ops whose
 #: semantics were MEASURED to match. Each omission has its own reason, and the reasons are not
 #: interchangeable.
 #:
@@ -682,13 +681,13 @@ def _names_filter_to_list(names_filter: Any, engine_model: Any) -> list[str]:
 #:
 #: ``patch`` is a lens-coordinate SWAP, ``h <- h + V(sigma(c) - c)``, whose targets are a permutation of
 #: the coordinates MEASURED during the forward. ``projection_cap`` takes static ``min``/``max``, so a
-#: data-dependent target cannot be expressed. This is the mode the J-space steering path uses.
+#: data-dependent target cannot be expressed. This is the op the J-space steering path uses.
 #:
 #: NOTE on a reason that was wrong here before: "additive steering never observes the current
 #: activation" is true of ``additive`` and false of ``orthogonal`` and ``projection_cap``, which both
 #: read it. Stating it as the general justification would have licensed exactly the ``project ->
 #: orthogonal`` mapping refused above. Each refusal now names its own mechanism.
-_MODE_TO_STEER_METHOD = {"add": "additive", "reject": "orthogonal", "clamp": "projection_cap"}
+_OP_TO_STEER_METHOD = {"add": "additive", "reject": "orthogonal", "clamp": "projection_cap"}
 
 #: Why per-row engine specs reproduce a span operation only for orthonormal rows -- and why that
 #: constrains ``clamp`` but no longer ``reject``. The engine's projector is RANK ONE
@@ -700,12 +699,12 @@ _MODE_TO_STEER_METHOD = {"add": "additive", "reject": "orthogonal", "clamp": "pr
 #: by name (see ``_clamp_cap_rows``) rather than orthonormalised or approximated.
 _CLAMP_SPAN_CAVEAT = "rank-1 per spec; span operations need orthonormal rows"
 
-#: Explicit refusal reasons for the modes ``_MODE_TO_STEER_METHOD`` does not map, keyed by
-#: interpretune mode value. Each reason names its own mechanism (see the mapping table's notes):
+#: Explicit refusal reasons for the ops ``_OP_TO_STEER_METHOD`` does not map, keyed by
+#: interpretune op value. Each reason names its own mechanism (see the mapping table's notes):
 #: a shared justification previously licensed the ``project -> orthogonal`` substitution this
-#: file refuses. A mode in NEITHER the table NOR this dict is undecided, and the seam test fails
+#: file refuses. An op in NEITHER the table NOR this dict is undecided, and the seam test fails
 #: naming it until someone rules. That red is the deliverable, not a side effect.
-_MODE_REFUSAL_REASONS = {
+_OP_REFUSAL_REASONS = {
     "replace": (
         "an overwrite replaces the whole activation, while every engine steering method moves "
         "only the component along one direction and leaves the complement untouched"
@@ -719,14 +718,18 @@ _MODE_REFUSAL_REASONS = {
         "component where ``orthogonal`` keeps the orthogonal one, so no coefficient converts"
     ),
     "scale": (
-        "an elementwise product rescales every coordinate of the activation, while every engine "
-        "steering method acts on the component along one direction and leaves the complement untouched"
+        "an elementwise multiplier on the activation, while every engine steering method adds a delta "
+        "along one direction, so no direction and coefficient express a per-unit gain"
+    ),
+    "replace_with_error": (
+        "a straight-through substitution whose forward value is the activation itself and whose effect "
+        "is on the gradient, while the engine's steering surface computes forward edits only"
     ),
 }
 
 
-def _uncovered_modes(documented: set[str], table: dict[str, str], reasons: dict[str, str]) -> set[str]:
-    """Modes with neither a mapping nor an explicit refusal reason.
+def _uncovered_ops(documented: set[str], table: dict[str, str], reasons: dict[str, str]) -> set[str]:
+    """Ops with neither a mapping nor an explicit refusal reason.
 
     Factored so the coverage guard's ability to fire is itself testable: the live seam test
     derives ``documented`` from ``InterventionMode`` and asserts the result is empty, while the
@@ -735,30 +738,30 @@ def _uncovered_modes(documented: set[str], table: dict[str, str], reasons: dict[
     return set(documented) - set(table) - set(reasons)
 
 
-def _steer_method_for(mode: str) -> str:
-    """Translate an intervention mode, refusing the ones this backend cannot express faithfully."""
-    method = _MODE_TO_STEER_METHOD.get(mode)
+def _steer_method_for(op: str) -> str:
+    """Translate an intervention op, refusing the ones this backend cannot express faithfully."""
+    method = _OP_TO_STEER_METHOD.get(op)
     if method is None:
         raise UnmappableHookError(
-            f"intervention mode {mode!r} cannot be expressed through interp-engine's steering surface "
-            f"from this backend (supported: {sorted(_MODE_TO_STEER_METHOD)}). See the mapping table's "
-            "notes for why each refused mode is refused -- the reasons differ, and 'project' in "
+            f"intervention op {op!r} cannot be expressed through interp-engine's steering surface "
+            f"from this backend (supported: {sorted(_OP_TO_STEER_METHOD)}). See the mapping table's "
+            "notes for why each refused op is refused -- the reasons differ, and 'project' in "
             "particular is NOT interp-engine's 'orthogonal' despite the name: they are complementary "
             "projections. Refused rather than approximated: a steering call that silently applied the "
-            "wrong mode would complete and return plausible logits for an intervention nobody asked for."
+            "wrong op would complete and return plausible logits for an intervention nobody asked for."
         )
     return method
 
 
-def _coeff_for(mode_value: str, scale_factor: float) -> float:
-    """The engine coefficient for a mapped mode and intervention scale.
+def _coeff_for(op_value: str, scale_factor: float) -> float:
+    """The engine coefficient for a mapped op and intervention scale.
 
     ``add`` passes the scale through (the operations are the same one). ``reject`` complements it:
     the engine keeps ``coeff`` along the vector while interpretune removes ``scale_factor``, so
-    ``coeff = 1 - scale_factor``. A non-mapped mode never reaches here (``_steer_method_for``
+    ``coeff = 1 - scale_factor``. A non-mapped op never reaches here (``_steer_method_for``
     refuses it first); the table, not this function, decides what maps.
     """
-    if mode_value == "reject":
+    if op_value == "reject":
         return 1.0 - scale_factor
     return scale_factor
 
@@ -854,8 +857,8 @@ def _clamp_cap_rows(tensor: Any, hook_name: str) -> list[tuple[Any, float]]:
 _CLAMP_ORTHOGONALITY_TOLERANCE = 1e-6
 
 
-def _refuse_mixed_modes(targets: list[tuple[int, str, Any]]) -> None:
-    """Refuse non-commuting modes mixed ACROSS scopes at one point, naming the unmeasured order.
+def _refuse_mixed_ops(targets: list[tuple[int, str, Any]]) -> None:
+    """Refuse non-commuting ops mixed ACROSS scopes at one point, naming the unmeasured order.
 
     Interpretune's contract is sequential application in declaration order, and within one scope
     this backend honours it exactly: specs are grouped by scope preserving declaration order, and
@@ -863,25 +866,25 @@ def _refuse_mixed_modes(targets: list[tuple[int, str, Any]]) -> None:
     adapter enters one nested steering context per scope, and the order in which nested contexts'
     hooks fire relative to declaration order is unmeasured -- so an ``add`` and a ``reject`` split
     across scopes has no defined meaning yet and is refused. Same scope (even mixed) flows
-    through in declaration order; same-mode multiplicity anywhere is fine.
+    through in declaration order; same-op multiplicity anywhere is fine.
     """
     scopes_by_point: dict[tuple[int, str], dict[str, set[Any]]] = {}
     for layer, point, spec in targets:
-        mode = _spec_field(spec, "mode", "replace")
-        mode_value = getattr(mode, "value", mode)
+        op = _spec_field(spec, "op", "replace")
+        op_value = getattr(op, "value", op)
         scope = _spec_field(spec, "position_scope", PositionScope.LAST_TOKEN)
         scope_value = getattr(scope, "value", scope)
-        scopes_by_point.setdefault((layer, point), {}).setdefault(mode_value, set()).add(scope_value)
-    for (layer, point), by_mode in scopes_by_point.items():
-        if "add" in by_mode and "reject" in by_mode:
-            scopes = by_mode["add"] | by_mode["reject"]
+        scopes_by_point.setdefault((layer, point), {}).setdefault(op_value, set()).add(scope_value)
+    for (layer, point), by_op in scopes_by_point.items():
+        if "add" in by_op and "reject" in by_op:
+            scopes = by_op["add"] | by_op["reject"]
             if len(scopes) > 1:
                 raise UnmappableHookError(
                     f"interventions at layer {layer}, point {point!r} mix 'add' and 'reject' "
                     "across position scopes: rejecting after adding differs from adding after "
                     "rejecting, and this backend enters one nested steering context per scope, "
                     "whose firing order relative to declaration order is unmeasured. Keep "
-                    "non-commuting modes in one scope, where declaration order is honoured "
+                    "non-commuting ops in one scope, where declaration order is honoured "
                     "exactly, or split them across calls."
                 )
 
@@ -890,7 +893,7 @@ def _require_expressible_operand(tensor: Any, hook_name: str, *, scope: Any = No
     """Refuse a span operand, because the engine's projector is rank-one and additive BROADCASTS.
 
     interpretune's ``intervention_tensor`` is deliberately polymorphic: it may be ``(d_model,)`` or a
-    higher-rank slice, and the J-space modes are defined over a ``(k, d_model)`` span. This backend
+    higher-rank slice, and the J-space ops are defined over a ``(k, d_model)`` span. This backend
     cannot take that shape, and the two ways it fails are different kinds of bad:
 
     * ``orthogonal``/``projection_cap`` raise, but with a tensor-size message naming neither the span
@@ -1483,7 +1486,7 @@ def _circuit_tracer_pairing() -> Any:
 
 
 class InterpEngineModelBackend:
-    """The engine as an interpretune ``ModelBackend``: required core plus ``ACTIVATION_INTERVENTION``.
+    """The engine as an interpretune ``ModelBackend``: required core plus ``INTERVENTION``.
 
     CARRIES ITS ENGINE MODEL, because the one it is HANDED is the wrong object. Interpretune's ops call
     ``backend.fwd(model=module.model, batch=batch)``, and every bundled adapter satisfies that because
@@ -1532,7 +1535,12 @@ class InterpEngineModelBackend:
 
     @property
     def capabilities(self) -> frozenset[Any]:
-        return frozenset({ModelBackendCapability.ACTIVATION_INTERVENTION})
+        return frozenset({Capability.INTERVENTION, Capability.CAPTURE})
+
+    @property
+    def requires(self) -> frozenset[Any]:
+        """Nothing: a model backend is the composition's base."""
+        return frozenset()
 
     def capture_support(self, model: Any) -> Any:
         """Which vocabulary points this backend can capture on ``model``, derived rather than declared.
@@ -1619,19 +1627,19 @@ class InterpEngineModelBackend:
 
     @property
     def intervention_support(self) -> InterventionSupport:
-        """Which configurations of ``ACTIVATION_INTERVENTION`` this backend honours.
+        """Which configurations of ``INTERVENTION`` this backend honours.
 
         BOTH scopes, because the engine expresses them one argument apart: ``position_mask`` excludes
         positions, so ``LAST_TOKEN`` is a mask and ``ALL_POSITIONS`` is its absence. Declaring only
         ``LAST_TOKEN`` would have been the easy answer and the wrong one -- it would refuse an operation
         this backend can perform exactly, which is the mirror image of silently narrowing one.
 
-        TWO modes. The reason the others stay out is NOT that the engine cannot see the current
-        activation, which an earlier version of this docstring claimed: two of its three steering
+        THREE ops (``add``, ``reject``, ``clamp``). The reason the others stay out is NOT that the engine
+        cannot see the current activation, which an earlier version of this docstring claimed: two of its three steering
         methods read it (``orthogonal`` and ``projection_cap`` both project the residual onto the
         vector), and only ``additive`` does not. The reason is that the three are a closed set of
         specific arithmetic forms rather than a general "compute a delta from h" hook, and the missing
-        modes need arithmetic none of them computes -- except ``reject``, which ``orthogonal``
+        ops need arithmetic none of them computes -- except ``reject``, which ``orthogonal``
         computes exactly once the span is orthonormalised (see the mapping table):
 
         * ``reject`` maps with ``coeff = 1 - scale_factor`` over an orthonormalised span basis.
@@ -1649,11 +1657,14 @@ class InterpEngineModelBackend:
         """
         # Derived from the mapping rather than restated, so the two cannot disagree. That also means a
         # test comparing this declaration against the mapping compares the mapping to itself and can
-        # never fail; what actually needs asserting is that each declared mode STEERS, which is
-        # `TestEveryDeclaredModeCanActuallySteer` in the seam tests.
+        # never fail; what actually needs asserting is that each declared op STEERS, which is
+        # `TestEveryDeclaredOpCanActuallySteer` in the seam tests.
         return InterventionSupport(
             position_scopes=frozenset({PositionScope.LAST_TOKEN, PositionScope.ALL_POSITIONS}),
-            modes=frozenset({InterventionMode(mode) for mode in _MODE_TO_STEER_METHOD}),
+            ops=frozenset(_OP_TO_STEER_METHOD),
+            # a whole activation, or a unit set scattered into one (a dense operand); no latent features, since this
+            # backend does not provide LATENT_MODELS
+            targets={"activation": None, "units": None},
         )
 
     def supports(self, capability: Any) -> bool:
@@ -1709,7 +1720,7 @@ class InterpEngineModelBackend:
         """
         if latent_model_handles:
             raise UnmappableHookError(
-                "this backend does not support latent-model handles (it claims ACTIVATION_INTERVENTION but not "
+                "this backend does not support latent-model handles (it claims INTERVENTION but not "
                 "LATENT_MODELS); attach latents through a backend that does, rather than having them "
                 "silently ignored here."
             )
@@ -1719,18 +1730,18 @@ class InterpEngineModelBackend:
         # InterventionSpec fans out to one or more engine specs: `add` is one-to-one, while `reject`
         # over a (k, d) span becomes one spec per orthonormalised basis vector (see
         # `_reject_basis_rows`). Mixed `add`/`reject` at one point is refused before any of that, in
-        # `_refuse_mixed_modes`, because the two do not commute.
+        # `_refuse_mixed_ops`, because the two do not commute.
         targets = list(_intervention_targets(interventions, self._engine(model)))
-        _refuse_mixed_modes(targets)
+        _refuse_mixed_ops(targets)
         specs: list[tuple[Any, Any]] = []
         for layer, point, spec in targets:
-            mode = _spec_field(spec, "mode", "replace")
-            mode_value = getattr(mode, "value", mode)
-            method = _steer_method_for(mode)
+            op = _spec_field(spec, "op", "replace")
+            op_value = getattr(op, "value", op)
+            method = _steer_method_for(op)
             scale = _spec_field(spec, "scale_factor")
             scope = normalize_position_scope(_spec_field(spec, "position_scope", PositionScope.LAST_TOKEN))
             tensor = _spec_field(spec, "intervention_tensor")
-            if mode_value == "reject":
+            if op_value == "reject":
                 rows = _reject_basis_rows(tensor, point)
                 for row in rows:
                     specs.append(
@@ -1739,7 +1750,7 @@ class InterpEngineModelBackend:
                             _Seam.steer_spec(
                                 vector=row,
                                 layer=layer,
-                                coeff=_coeff_for(mode_value, scale),
+                                coeff=_coeff_for(op_value, scale),
                                 method=method,
                                 point=point,
                                 explicit=True,
@@ -1747,7 +1758,7 @@ class InterpEngineModelBackend:
                         )
                     )
                 continue
-            if mode_value == "clamp":
+            if op_value == "clamp":
                 lo = _spec_field(spec, "clamp_min", None)
                 hi = _spec_field(spec, "clamp_max", None)
                 for row, norm in _clamp_cap_rows(tensor, point):
@@ -1772,7 +1783,7 @@ class InterpEngineModelBackend:
                     _Seam.steer_spec(
                         vector=_require_expressible_operand(tensor, point, scope=scope, seq_len=_prompt_length(tokens)),
                         layer=layer,
-                        coeff=_coeff_for(mode_value, scale),
+                        coeff=_coeff_for(op_value, scale),
                         method=method,
                         point=point,
                         explicit=True,
