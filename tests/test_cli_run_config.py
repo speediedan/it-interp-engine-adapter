@@ -75,7 +75,9 @@ def cache(tmp_path, monkeypatch):
     shutil.copytree(warmed, components._repo_dir(SEED_REPO, root), symlinks=True)
     monkeypatch.setattr(components, "IT_COMPONENTS_HUB_CACHE", root)
     monkeypatch.setenv("IT_TRUST_REMOTE_CODE", "1")
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    # The seed's configuration loads the model with `device_map: cpu`, so the run stays on the CPU without hiding the
+    # GPUs. Hiding them here would not be undone with the environment: CUDA reads `CUDA_VISIBLE_DEVICES` once, when the
+    # run's first `torch.cuda.is_available()` initializes it, and every later test in the process would find no GPU.
     adapter_revision = components.local_publish(ROOT / "src" / "interp_engine_adapter", REPO, cache_dir=root)
     return adapter_revision, SEED_REVISION
 
