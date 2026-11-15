@@ -118,3 +118,26 @@ def test_a_foreign_backend_name_is_refused_by_name():
 
     with pytest.raises(adapter_mod.UnmappableHookError, match="must be 'interp_engine'"):
         _Probe()._load_interp_engine_replacement_model()
+
+
+@requires_ct
+def test_the_pairing_declares_circuit_tracers_tunable_view():
+    """The pairing tunes through interpretune's circuit-tracer view, not the identity default (#48).
+
+    Its replacement model is the module's ``model``, so an identity view would name base-model tensors as trainable;
+    ``CircuitTracerView`` names the transcoders (``artifact``, formerly ``instrument``, until promoted) and refuses
+    base-model tensors. The pairing inherits that declaration from ``BaseCircuitTracerModule`` rather than overriding
+    it, and with no replacement model loaded the view refuses the composition.
+    """
+    from interpretune.tuning.views import RefusingView, fts_views_available
+
+    if not fts_views_available():
+        pytest.skip("interpretune's tunable views are unavailable on this install")
+    from interpretune.adapters.circuit_tracer.adapter import BaseCircuitTracerModule
+
+    pairing = adapter_mod._circuit_tracer_pairing()
+    assert pairing.build_tunable_view is BaseCircuitTracerModule.build_tunable_view
+    module = pairing.__new__(pairing)
+    view = module.build_tunable_view()
+    assert isinstance(view, RefusingView)
+    assert not view.support().trainable
