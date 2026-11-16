@@ -1,0 +1,41 @@
+# The CPU-sized form of `rte_ft.qwen3.interp_engine.core.yaml`: `speediedan/rte`'s `rte_ft.gpt2.core` configuration,
+# phased with finetuning-scheduler on interpretune's core loop, on the `(core, interp_engine)` composition. The adapter
+# is loaded from the Hub by `hub_adapters` (speediedan/interpretune#872), so the run needs no Python step:
+#
+#   IT_TRUST_REMOTE_CODE=1 interpretune --run_command train --config rte_ft.gpt2.interp_engine.core.yaml
+#
+# `tests/test_cli_run_config.py` runs this file with the entry pointed at this checkout's adapter.
+hub_adapters:
+  - speediedan/it-interp-engine-adapter@2aff684002ad
+session_ref: speediedan/rte:rte_ft.gpt2.core
+adapter_ctx:
+  - core
+  - interp_engine
+registered_cfg:
+  module_cfg:
+    init_args:
+      auto_comp_cfg:
+        init_args:
+          target_adapters: interp_engine
+      interp_engine_cfg:
+        class_path: it_hub_adapters.speediedan__it_interp_engine_adapter.InterpEngineConfig
+seed_everything: 0
+run_cfg:
+  max_epochs: 10
+  callbacks:
+    - class_path: interpretune.tuning.core_loop.FTSCoreCallback
+      init_args:
+        schedule: hub://speediedan/rte/ft_schedules/rte_ft.gpt2.yaml
+        tuning_scheduler_kwargs:
+          max_depth: -1
+          transition:
+            class_path: finetuning_scheduler.core.transitions.PlateauTransition
+            init_args:
+              monitor: val_loss
+              patience: 1
+              min_delta: 0.001
+          checkpoint:
+            class_path: finetuning_scheduler.core.checkpoint.BestCheckpoint
+            init_args:
+              dirpath: checkpoints/rte_ft.gpt2.interp_engine.core
+              monitor: val_loss

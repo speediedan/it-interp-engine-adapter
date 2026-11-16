@@ -13,6 +13,8 @@ import contextlib
 import pathlib
 
 import pytest
+import torch
+from interpretune.analysis.backends.capabilities import PositionScope
 
 # INTERNALS COME FROM `.adapter`, NOT FROM THE PACKAGE, and the distinction is load-bearing rather than
 # stylistic. `adapter.py` is the file the hub loader executes by path out of the snapshot; the package
@@ -26,6 +28,7 @@ from interp_engine_adapter.adapter import (
     InterpEngineModule,
     UnmappableHookError,
     _Seam,
+    _require_expressible_operand,
 )
 
 
@@ -525,18 +528,18 @@ class TestModelBackendIsAttachedNotOverridden:
 class TestModelBackend:
     """The backend claims exactly what it implements, and refuses what it does not."""
 
-    def test_claims_intervention_and_nothing_else(self):
-        from interpretune.analysis.backends.capabilities import ModelBackendCapability
+    def test_claims_intervention_and_capture_and_nothing_else(self):
+        from interpretune.analysis.backends.capabilities import Capability
         from interp_engine_adapter.adapter import InterpEngineModelBackend
 
         backend = InterpEngineModelBackend()
-        assert backend.supports(ModelBackendCapability.ACTIVATION_INTERVENTION)
+        assert backend.supports(Capability.INTERVENTION) and backend.supports(Capability.CAPTURE)
         # Enumerated from the ENUM rather than a hand-written list. The previous version named
         # BATCHED_HOOKS explicitly and went stale the moment speediedan/interpretune#449 removed it,
         # which is the failure mode of pinning a vocabulary by transcription: the test breaks on a
         # change it was not written to have an opinion about. Deriving the complement means a member
         # added upstream is asserted absent automatically, and a member removed simply disappears.
-        for absent in set(ModelBackendCapability) - {ModelBackendCapability.ACTIVATION_INTERVENTION}:
+        for absent in set(Capability) - {Capability.INTERVENTION, Capability.CAPTURE}:
             assert not backend.supports(absent), f"unexpectedly claims {absent}"
 
     def test_satisfies_core_and_intervention_protocols_only(self):
@@ -729,12 +732,14 @@ class TestTheCircuitTracerGuardPropagatesOnlyOurOwnRefusals:
         assert issubclass(EngineHasNoPointError, UnmappableHookError)
 
 
-class TestDeprecatedSpellingsStayNameable:
-    """A spelling interpretune deprecates but still resolves must stay in this backend's inventory.
+class TestNonCanonicalSpellingsStayNameable:
+    """A spelling interpretune accepts but only leniently must stay in this backend's inventory.
 
     speediedan/interpretune#463 made `parse(name, strict=True)` refuse deprecated aliases -- `attn.hook_z`
-    among them, which resolves leniently to the `attn.o` component. `_hook_vocabulary` parses LENIENTLY,
-    deliberately, and this pins that choice against a future tightening.
+    among them, which resolves leniently to the `attn.o` component. speediedan/interpretune#612 then
+    settled those aliases as accepted vocabulary rather than deprecated spellings: strict parsing still
+    refuses them, now as `NonCanonicalPointError`. `_hook_vocabulary` parses LENIENTLY, deliberately,
+    and this pins that choice against a future tightening.
 
     WHY LENIENT IS THE RIGHT DEFAULT HERE. The inventory answers "what could a caller name?", not "what
     spelling would we recommend?". A caller whose predicate targets `attn.hook_z` is asking for a tensor
@@ -748,7 +753,7 @@ class TestDeprecatedSpellingsStayNameable:
     upstream change that caused it. Failing here instead names the spelling and this reasoning.
     """
 
-    def test_a_deprecated_but_resolvable_spelling_is_offered_and_resolves(self):
+    def test_a_lenient_only_spelling_is_offered_and_resolves(self):
         from interp_engine_adapter.adapter import _Seam, _hook_vocabulary
 
         model = _FakeEngineModel()
@@ -759,15 +764,11 @@ class TestDeprecatedSpellingsStayNameable:
         """Stated as a property of interpretune's parser, so a change upstream fails HERE by name."""
         pytest.importorskip("interpretune.analysis.points")
         from interpretune.analysis.points import parse
+        from interpretune.analysis.points.vocabulary import NonCanonicalPointError
 
         assert parse("attn.hook_z").component == "attn.o"
-        with pytest.raises(Exception) as excinfo:
+        with pytest.raises(NonCanonicalPointError, match="strict parsing accepts canonical names only"):
             parse("attn.hook_z", strict=True)
-        assert "Deprecated" in type(excinfo.value).__name__, (
-            f"expected a deprecation refusal under strict parsing, got {type(excinfo.value).__name__}. "
-            "If interpretune stopped deprecating this spelling, the lenient choice in `_hook_vocabulary` "
-            "may no longer be load-bearing and this test should be revisited rather than patched."
-        )
 
 
 class TestMeasuredAliasesAreNotTheRefusals:
@@ -843,23 +844,23 @@ def _seam_alias_table() -> dict:
     return _Seam._SUBLAYER_INPUT_ALIASES
 
 
-def _mode_table() -> dict:
-    from interp_engine_adapter.adapter import _MODE_TO_STEER_METHOD
+def _op_table() -> dict:
+    from interp_engine_adapter.adapter import _OP_TO_STEER_METHOD
 
-    return _MODE_TO_STEER_METHOD
+    return _OP_TO_STEER_METHOD
 
 
 def _refusal_reasons() -> dict:
-    from interp_engine_adapter.adapter import _MODE_REFUSAL_REASONS
+    from interp_engine_adapter.adapter import _OP_REFUSAL_REASONS
 
-    return _MODE_REFUSAL_REASONS
+    return _OP_REFUSAL_REASONS
 
 
-class TestInterventionModeIsHonoured:
-    """`InterventionSpec.mode` must reach the engine, or be refused -- never silently dropped.
+class TestInterventionOpIsHonoured:
+    """`InterventionSpec.op` must reach the engine, or be refused -- never silently dropped.
 
-    The first draft of this backend built every SteerSpec with the default method, so `mode` was
-    ignored entirely. Interpretune's DEFAULT mode is `replace`, and the J-space steering path uses
+    The first draft of this backend built every SteerSpec with the default method, so `op` was
+    ignored entirely. Interpretune's DEFAULT op is `replace`, and the J-space steering path uses
     `patch`; both would have been applied as ADDITIVE steering, completing normally and returning
     plausible logits for an intervention nobody requested.
     """
@@ -869,64 +870,64 @@ class TestInterventionModeIsHonoured:
 
         assert _steer_method_for("add") == "additive"
 
-    @pytest.mark.parametrize("mode", sorted(_refusal_reasons()))
-    def test_modes_that_need_the_current_activation_are_refused(self, mode):
+    @pytest.mark.parametrize("op", sorted(_refusal_reasons()))
+    def test_ops_that_need_the_current_activation_are_refused(self, op):
         from interp_engine_adapter.adapter import UnmappableHookError, _steer_method_for
 
-        with pytest.raises(UnmappableHookError, match=f"intervention mode {mode!r} cannot be expressed"):
-            _steer_method_for(mode)
+        with pytest.raises(UnmappableHookError, match=f"intervention op {op!r} cannot be expressed"):
+            _steer_method_for(op)
 
     def test_every_mapped_method_is_one_the_engine_actually_offers(self):
         """Positive control: the mapping table must name real engine methods, not aspirational ones."""
         from interp_engine import STEER_METHODS
 
-        from interp_engine_adapter.adapter import _MODE_TO_STEER_METHOD
+        from interp_engine_adapter.adapter import _OP_TO_STEER_METHOD
 
-        for mode, method in _MODE_TO_STEER_METHOD.items():
-            assert method in STEER_METHODS, f"{mode!r} maps to {method!r}, absent from {STEER_METHODS}"
+        for op, method in _OP_TO_STEER_METHOD.items():
+            assert method in STEER_METHODS, f"{op!r} maps to {method!r}, absent from {STEER_METHODS}"
 
-    def test_every_interpretune_mode_is_mapped_or_explicitly_refused(self):
-        """Every interpretune mode is mapped or carries a refusal reason, or this fails naming it.
+    def test_every_interpretune_op_is_mapped_or_explicitly_refused(self):
+        """Every interpretune op is mapped or carries a refusal reason, or this fails naming it.
 
-        The failure mode being guarded is a NEW mode defaulting into silence: without this, a mode
+        The failure mode being guarded is a NEW op defaulting into silence: without this, an op
         added upstream would simply not appear in the table and would raise only when someone used
-        it. ``documented`` is derived from the enum rather than a literal, because a literal cannot
+        it. ``documented`` is derived from the op registry rather than a literal, because a literal cannot
         report on a member that did not exist when it was written.
         """
-        from interpretune.analysis.backends.capabilities import InterventionMode
         from interpretune.analysis.backends.interventions import InterventionSpec
+        from interpretune.analysis.backends.ops import registered_ops
 
-        from interp_engine_adapter.adapter import _MODE_REFUSAL_REASONS, _uncovered_modes
+        from interp_engine_adapter.adapter import _OP_REFUSAL_REASONS, _uncovered_ops
 
-        # `_field_defaults`, not `InterventionSpec.mode`: this is a NamedTuple, so the attribute is the
+        # `_field_defaults`, not `InterventionSpec.op`: this is a NamedTuple, so the attribute is the
         # field DESCRIPTOR and comparing it to a string is always False -- an assertion that would have
         # failed for a reason unrelated to what it checks.
-        assert InterventionSpec._field_defaults["mode"] == "replace", (
-            "the default intervention mode changed; revisit which modes this backend refuses"
+        assert InterventionSpec._field_defaults["op"] == "replace", (
+            "the default intervention op changed; revisit which ops this backend refuses"
         )
-        documented = {m.value for m in InterventionMode}
-        uncovered = _uncovered_modes(documented, _mode_table(), _MODE_REFUSAL_REASONS)
+        documented = set(registered_ops())
+        uncovered = _uncovered_ops(documented, _op_table(), _OP_REFUSAL_REASONS)
         assert uncovered == set(), (
-            f"intervention modes with no mapping and no refusal reason: {sorted(uncovered)}. "
+            f"intervention ops with no mapping and no refusal reason: {sorted(uncovered)}. "
             "Decide the mapping or the refusal."
         )
 
-    def test_the_coverage_guard_fires_on_an_undecided_mode(self):
-        """Positive control: a mode with no mapping and no reason fails the guard naming it.
+    def test_the_coverage_guard_fires_on_an_undecided_op(self):
+        """Positive control: an op with no mapping and no reason fails the guard naming it.
 
         Without this, replacing an inert guard with one whose ability to fire is unverified would
         repeat the exercise.
         """
-        from interp_engine_adapter.adapter import _uncovered_modes
+        from interp_engine_adapter.adapter import _uncovered_ops
 
-        uncovered = _uncovered_modes({"add", "probe_undecided"}, {"add": "additive"}, {})
+        uncovered = _uncovered_ops({"add", "probe_undecided"}, {"add": "additive"}, {})
         assert uncovered == {"probe_undecided"}
 
     def test_an_explicit_refusal_reason_satisfies_the_guard(self):
         """Positive control the other way: the reason dict must not become a second inert path."""
-        from interp_engine_adapter.adapter import _uncovered_modes
+        from interp_engine_adapter.adapter import _uncovered_ops
 
-        uncovered = _uncovered_modes(
+        uncovered = _uncovered_ops(
             {"add", "probe_refused"},
             {"add": "additive"},
             {"probe_refused": "cannot be expressed, and this string is the reason"},
@@ -1015,7 +1016,7 @@ class TestRejectMapping:
     def _reference(h, V, alpha):
         from interpretune.analysis.backends.interventions import InterventionSpec, _apply_span_rejection
 
-        spec = InterventionSpec(intervention_tensor=V, mode="reject", scale_factor=alpha)
+        spec = InterventionSpec(intervention_tensor=V, op="reject", scale_factor=alpha)
         return _apply_span_rejection(spec, input_value=h, target=V)
 
     @staticmethod
@@ -1086,33 +1087,33 @@ class TestRejectMapping:
 
     def test_mixed_add_and_reject_in_one_scope_flows_through(self):
         """Declaration order is the contract within a scope: no refusal, order preserved upstream."""
-        from interp_engine_adapter.adapter import _refuse_mixed_modes
+        from interp_engine_adapter.adapter import _refuse_mixed_ops
 
-        _refuse_mixed_modes(
+        _refuse_mixed_ops(
             [
-                (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
-                (0, "p", {"mode": "reject", "intervention_tensor": 0, "scale_factor": 1.0}),
+                (0, "p", {"op": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
+                (0, "p", {"op": "reject", "intervention_tensor": 0, "scale_factor": 1.0}),
             ]
         )
-        _refuse_mixed_modes(
+        _refuse_mixed_ops(
             [
-                (0, "p", {"mode": "reject", "intervention_tensor": 0, "scale_factor": 1.0}),
-                (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
+                (0, "p", {"op": "reject", "intervention_tensor": 0, "scale_factor": 1.0}),
+                (0, "p", {"op": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
             ]
         )
 
     def test_mixed_add_and_reject_across_scopes_is_refused_by_name(self):
-        from interp_engine_adapter.adapter import UnmappableHookError, _refuse_mixed_modes
+        from interp_engine_adapter.adapter import UnmappableHookError, _refuse_mixed_ops
 
         with pytest.raises(UnmappableHookError, match="across position scopes"):
-            _refuse_mixed_modes(
+            _refuse_mixed_ops(
                 [
-                    (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
+                    (0, "p", {"op": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
                     (
                         0,
                         "p",
                         {
-                            "mode": "reject",
+                            "op": "reject",
                             "intervention_tensor": 0,
                             "scale_factor": 1.0,
                             "position_scope": "all_positions",
@@ -1121,16 +1122,16 @@ class TestRejectMapping:
                 ]
             )
 
-    def test_same_mode_multiplicity_is_not_a_mixture(self):
-        from interp_engine_adapter.adapter import _refuse_mixed_modes
+    def test_same_op_multiplicity_is_not_a_mixture(self):
+        from interp_engine_adapter.adapter import _refuse_mixed_ops
 
-        _refuse_mixed_modes(
+        _refuse_mixed_ops(
             [
-                (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
-                (0, "p", {"mode": "add", "intervention_tensor": 0, "scale_factor": 0.5}),
+                (0, "p", {"op": "add", "intervention_tensor": 0, "scale_factor": 1.0}),
+                (0, "p", {"op": "add", "intervention_tensor": 0, "scale_factor": 0.5}),
             ]
         )
-        _refuse_mixed_modes([(0, "p", {"mode": "reject", "intervention_tensor": 0, "scale_factor": 1.0})])
+        _refuse_mixed_ops([(0, "p", {"op": "reject", "intervention_tensor": 0, "scale_factor": 1.0})])
 
     def test_reject_operand_shapes(self):
         import torch
@@ -1148,11 +1149,11 @@ class TestRejectMapping:
         with pytest.raises(UnmappableHookError, match="NaN"):
             _reject_basis_rows(torch.full((2, 8), float("nan")), "p")
 
-    def test_modes_declaration_matches_the_ruled_mapping(self):
-        from interp_engine_adapter.adapter import _MODE_REFUSAL_REASONS, _MODE_TO_STEER_METHOD
+    def test_ops_declaration_matches_the_ruled_mapping(self):
+        from interp_engine_adapter.adapter import _OP_REFUSAL_REASONS, _OP_TO_STEER_METHOD
 
-        assert set(_MODE_TO_STEER_METHOD) == {"add", "reject", "clamp"}
-        assert set(_MODE_REFUSAL_REASONS) == {"replace", "patch", "project"}
+        assert set(_OP_TO_STEER_METHOD) == {"add", "reject", "clamp"}
+        assert set(_OP_REFUSAL_REASONS) == {"replace", "patch", "project", "scale", "replace_with_error"}
 
 
 class TestClampMapping:
@@ -1197,7 +1198,7 @@ class TestClampMapping:
     def _reference(cls, h, V, lo=LO, hi=HI):
         from interpretune.analysis.backends.interventions import InterventionSpec, _apply_span_clamp
 
-        spec = InterventionSpec(intervention_tensor=V, mode="clamp", clamp_min=lo, clamp_max=hi)
+        spec = InterventionSpec(intervention_tensor=V, op="clamp", clamp_min=lo, clamp_max=hi)
         return _apply_span_clamp(spec, input_value=h, target=V)
 
     @classmethod
@@ -1519,13 +1520,13 @@ class TestCudaSelectionIsAdditive:
         assert os.getenv("IT_RUN_CUDA_TESTS", "0") != "1"
 
 
-class TestEveryDeclaredModeCanActuallySteer:
-    """A positive control on the band: a mode this backend DECLARES must be able to change something.
+class TestEveryDeclaredOpCanActuallySteer:
+    """A positive control on the band: an op this backend DECLARES must be able to change something.
 
-    `intervention_support` derives its modes from `_MODE_TO_STEER_METHOD`, so a test comparing the
+    `intervention_support` derives its ops from `_OP_TO_STEER_METHOD`, so a test comparing the
     declaration against the mapping compares the mapping to itself and cannot fail. What is not
     definitional, and is what a caller actually depends on, is that a spec built through the real seam
-    produces a NON-ZERO delta for some residual. Two ways a declared mode can silently do nothing, both
+    produces a NON-ZERO delta for some residual. Two ways a declared op can silently do nothing, both
     measured against the engine rather than reasoned about:
 
     * ``projection_cap`` clamps the projection into ``[min, max]`` and both bounds are independently
@@ -1543,12 +1544,12 @@ class TestEveryDeclaredModeCanActuallySteer:
     RESIDUALS = ((3.0, 4.0, 0.0), (-3.0, 4.0, 0.0), (0.5, 4.0, 0.0))
     COEFFS = (0.0, 0.5, 2.0)
 
-    def test_each_declared_mode_produces_a_nonzero_delta_for_some_input(self):
+    def test_each_declared_op_produces_a_nonzero_delta_for_some_input(self):
         import torch
         from interp_engine import steer_delta
 
         from interp_engine_adapter.adapter import (
-            _MODE_TO_STEER_METHOD,
+            _OP_TO_STEER_METHOD,
             _Seam,
             _steer_method_for,
             UnmappableHookError,
@@ -1556,8 +1557,8 @@ class TestEveryDeclaredModeCanActuallySteer:
 
         vector = torch.tensor([1.0, 0.0, 0.0])
         inert = []
-        for mode in sorted(_MODE_TO_STEER_METHOD):
-            method = _steer_method_for(mode)
+        for op in sorted(_OP_TO_STEER_METHOD):
+            method = _steer_method_for(op)
             steered = False
             for coeff in self.COEFFS:
                 try:
@@ -1580,13 +1581,13 @@ class TestEveryDeclaredModeCanActuallySteer:
                 if steered:
                     break
             if not steered:
-                inert.append(f"{mode!r} -> {method!r}")
+                inert.append(f"{op!r} -> {method!r}")
 
         assert not inert, (
-            "these declared intervention modes produce a zero delta for every coefficient and residual "
-            f"tried, so they steer nothing while being advertised as supported: {inert}. A mode whose "
+            "these declared intervention ops produce a zero delta for every coefficient and residual "
+            f"tried, so they steer nothing while being advertised as supported: {inert}. An op whose "
             "delta is unconditionally zero completes normally and returns plausible logits for an "
-            "intervention nobody performed. If this fired after adding a clamp mode, the cause is "
+            "intervention nobody performed. If this fired after adding a clamp op, the cause is "
             "`steer_spec` having no `min`/`max` parameter, so the `projection_cap` spec it builds has "
             "no band to clamp into."
         )
@@ -1615,7 +1616,7 @@ class TestTheUnbandedClampIsRefused:
 
     @pytest.mark.parametrize("kwargs,expected_in_message", IDENTITIES, ids=["orthogonal", "projection_cap"])
     def test_every_identity_parameterization_is_refused_naming_the_value(self, kwargs, expected_in_message):
-        """A spec that cannot steer ANY input is refused; the message names the mode and the value."""
+        """A spec that cannot steer ANY input is refused; the message names the op and the value."""
         import torch
 
         from interp_engine_adapter.adapter import UnmappableHookError, _Seam
@@ -1623,7 +1624,7 @@ class TestTheUnbandedClampIsRefused:
         with pytest.raises(UnmappableHookError) as excinfo:
             _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, **kwargs)
         message = str(excinfo.value)
-        assert kwargs["method"] in message, "the refusal must name the mode"
+        assert kwargs["method"] in message, "the refusal must name the op"
         assert expected_in_message in message, "it must name the value or parameter responsible"
 
     def test_an_explicitly_requested_zero_is_built_rather_than_refused(self):
@@ -1663,7 +1664,7 @@ class TestTheUnbandedClampIsRefused:
         with pytest.raises(UnmappableHookError) as excinfo:
             _Seam.steer_spec(vector=torch.tensor([1.0, 0.0, 0.0]), layer=0, method="projection_cap")
         message = str(excinfo.value)
-        assert "projection_cap" in message, "the refusal must name the mode it refused"
+        assert "projection_cap" in message, "the refusal must name the op it refused"
         assert "minimum" in message and "maximum" in message, "it must name the parameters that would fix it"
 
     @pytest.mark.parametrize(
@@ -1860,3 +1861,34 @@ class TestADroppedEngineConfigIsRefused:
             "a supplied config must be handed back unchanged; returning an equal-but-distinct object "
             "would hide a substitution just as a default did"
         )
+
+
+class TestPerPositionAddOperand:
+    """Adapter#39: under all_positions, a (seq_len, d_model) operand is a per-position delta.
+
+    The engine's ``additive`` applies one row per position by design when no position mask is built
+    (the ALL_POSITIONS case), so passing the operand through unchanged is exact -- it is the two-pass
+    J-space patch beyond the last token. Every other two-dimensional shape stays refused, because the
+    ``k == seq_len`` broadcast corruption the guard documents is not legitimised by any scope.
+    """
+
+    def test_seq_by_d_passes_through_under_all_positions(self):
+        """Two positions, two distinct deltas: the object returned is the object handed over."""
+        tensor = torch.tensor([[1.0, 0.0], [0.0, 2.0]])
+        assert _require_expressible_operand(tensor, "mlp_in", scope=PositionScope.ALL_POSITIONS, seq_len=2) is tensor
+
+    def test_span_whose_rows_are_not_one_per_position_is_refused(self):
+        """A (3, d) operand at 2 positions is the span confusion, not a per-position delta."""
+        with pytest.raises(UnmappableHookError) as excinfo:
+            _require_expressible_operand(torch.zeros(3, 8), "mlp_in", scope=PositionScope.ALL_POSITIONS, seq_len=2)
+        assert "per-position" in str(excinfo.value)
+
+    def test_seq_by_d_is_refused_under_last_token(self):
+        """One steered position takes a vector; a (seq, d) operand there is meaningless."""
+        with pytest.raises(UnmappableHookError):
+            _require_expressible_operand(torch.zeros(2, 8), "mlp_in", scope=PositionScope.LAST_TOKEN, seq_len=2)
+
+    def test_vector_is_untouched(self):
+        """The pre-existing contract: one-dimensional operands pass whatever the scope."""
+        tensor = torch.zeros(8)
+        assert _require_expressible_operand(tensor, "mlp_in", scope=PositionScope.ALL_POSITIONS, seq_len=2) is tensor

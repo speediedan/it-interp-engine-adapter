@@ -46,10 +46,14 @@ requires:
   interpretune: ">=0.1.0.dev0"
   pip:
     # NOTE the trailing patch digit: `~=1.11` would admit 1.12, which is precisely the break this pin
-    # exists to prevent. `~=1.11.1` is >=1.11.1, ==1.11.*, so it takes 1.11.x fixes and stops at 1.12. The
-    # floor is 1.11.1 rather than 1.11.0 because 1.11.0 was already superseded when this line moved.
+    # exists to prevent. `~=1.12.0` is >=1.12.0, ==1.12.*, so it takes 1.12.x fixes and stops at 1.13. The
+    # floor is 1.12.0 rather than 1.11.x because only 1.12 carries `position_ids` in `run_with_cache`
+    # (decoderesearch/interp-engine#28, released in 1.12.0): interpretune#644 moved the HF reference to
+    # mask-derived position ids, and engine <=1.11.2 cannot accept them, so 6 conformance cases diverged
+    # ~1e3 on padded batches until this move.
     #
-    # Moved from `~=1.5.1` after validating against 1.11.1 (interpretune#600; the 1.5 line predated the
+    # Moved from `~=1.11.1` after validating against 1.12.0 (adapter#44; the 1.11 line predated the
+    # mHC point set and the hyper-connection names now in `mappers.py`). The seam's contract tests assert
     # mHC point set and the hyper-connection names now in `mappers.py`). The seam's contract tests assert
     # against the INSTALLED engine -- STEER_METHODS membership, `EagerModel.capture`'s parameter ORDER,
     # `tlens_hook_to_point` resolving model-blind, `SteerSpec` accepting a (k, d) operand -- which is
@@ -58,4 +62,4 @@ requires:
     # This pin is the effective CEILING for circuit-tracer too, not only for this component:
     # circuit-tracer's own floor is `>=1.3.3` and admits far more, so whoever moves this line moves
     # what that package resolves as well.
-    - "interp-engine~=1.11.1"
+    - "interp-engine~=1.12.0"

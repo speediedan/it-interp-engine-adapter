@@ -275,7 +275,7 @@ class TestInterventionParity:
         from interpretune.analysis.backends import InterventionSpec
 
         extra = {"position_scope": scope} if scope is not None else {}
-        spec = InterventionSpec(intervention_tensor=steer_vector, mode="add", scale_factor=1.0, **extra)
+        spec = InterventionSpec(intervention_tensor=steer_vector, op="add", scale_factor=1.0, **extra)
         # A BARE spec, not a list. `InterventionSpec` is a NamedTuple, so this is the shape that used to
         # be unpacked into its own fields; passing it deliberately keeps that regression covered.
         # No coercion here any more, and its absence is the assertion. This used to normalize with
@@ -359,8 +359,8 @@ class TestInterventionParity:
         an operation the backend performs exactly, rather than substituting a wrong one, but still an
         answer that misrepresents what it can do.
 
-        This composes because every declared mode is additive and addition commutes, so group order cannot
-        matter. `test_the_declared_modes_equal_the_mapped_modes` is what keeps that true.
+        This composes because every declared op is additive and addition commutes, so group order cannot
+        matter. `test_the_declared_ops_equal_the_mapped_ops` is what keeps that true.
         """
         from interpretune.analysis.backends import InterventionSpec, PositionScope
 
@@ -368,10 +368,10 @@ class TestInterventionParity:
         v_all, v_last = torch.randn(768), torch.randn(768)
         payload = {
             "blocks.3.hook_resid_pre": InterventionSpec(
-                intervention_tensor=v_all, mode="add", scale_factor=1.0, position_scope=PositionScope.ALL_POSITIONS
+                intervention_tensor=v_all, op="add", scale_factor=1.0, position_scope=PositionScope.ALL_POSITIONS
             ),
             "blocks.7.hook_resid_pre": InterventionSpec(
-                intervention_tensor=v_last, mode="add", scale_factor=1.0, position_scope=PositionScope.LAST_TOKEN
+                intervention_tensor=v_last, op="add", scale_factor=1.0, position_scope=PositionScope.LAST_TOKEN
             ),
         }
         _, post = hosted._model_backend.fwd_w_intervention(hosted.engine_model, {"input_ids": prompt_ids}, payload)
@@ -396,14 +396,14 @@ class TestTheDeclarationAgreesWithTheImplementation:
     across backends. This is the one-line version for this component.
     """
 
-    def test_the_declared_modes_equal_the_mapped_modes(self, staged_module):
+    def test_the_declared_ops_equal_the_mapped_ops(self, staged_module):
         module, _ = staged_module
         backend = module.InterpEngineModelBackend()
-        declared = {m.value for m in backend.intervention_support.modes}
-        mapped = set(module._MODE_TO_STEER_METHOD)
+        declared = set(backend.intervention_support.ops)
+        mapped = set(module._OP_TO_STEER_METHOD)
         assert declared == mapped, (
-            f"declared modes {sorted(declared)} != mapped {sorted(mapped)}. A declaration wider than the "
-            "table promises a mode the seam refuses; narrower refuses one it can perform."
+            f"declared ops {sorted(declared)} != mapped {sorted(mapped)}. A declaration wider than the "
+            "table promises an op the seam refuses; narrower refuses one it can perform."
         )
 
     def test_both_scopes_are_declared_because_the_engine_expresses_both(self, staged_module):
@@ -442,7 +442,7 @@ class TestTheProtocolsDeclaredShapesAreReturned:
     def test_fwd_w_intervention_returns_tensors(self, hosted, prompt_ids, steer_vector):
         from interpretune.analysis.backends import InterventionSpec
 
-        spec = InterventionSpec(intervention_tensor=steer_vector, mode="add", scale_factor=1.0)
+        spec = InterventionSpec(intervention_tensor=steer_vector, op="add", scale_factor=1.0)
         pre, post = hosted._model_backend.fwd_w_intervention(
             hosted.engine_model, {"input_ids": prompt_ids}, {f"blocks.{LAYER}.hook_resid_pre": spec}
         )

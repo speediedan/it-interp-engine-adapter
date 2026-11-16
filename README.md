@@ -58,21 +58,24 @@ says so and points here.
 
 ### Declared capabilities
 
-`ACTIVATION_INTERVENTION`, and nothing else. Not `LATENT_MODELS`: passing latent-model handles is **refused**
-rather than ignored, because a result that looks like an intervention over latents and is not is worse
-than an error. Not `GRADIENTS`.
+`INTERVENTION` and `CAPTURE`, and nothing else. Not `LATENT_MODELS`: passing latent-model handles is
+**refused** rather than ignored, because a result that looks like an intervention over latents and is not is
+worse than an error. Not `GRADIENTS`. It requires nothing of another component.
 
-Interventions are **additive only**, at either position scope: `LAST_TOKEN` (the default) or
-`ALL_POSITIONS`. A payload mixing the two scopes is expressed, not refused, by nesting one steering
-context per scope group. Any other mode is refused by name on the mode axis.
+Its intervention support record declares three ops from venngram's registry, each mapped to an engine steering
+method whose arithmetic was measured to match: `add` (`additive`), `reject` (`orthogonal`, over an
+orthonormalised span) and `clamp` (`projection_cap`). Targets are a whole activation or a unit set scattered into
+one, at either position scope: `LAST_TOKEN` (the default) or `ALL_POSITIONS`. A payload mixing the two scopes is
+expressed, not refused, by nesting one steering context per scope group. Every other registered op (`replace`,
+`patch`, `project`, `scale`, `replace_with_error`, and any op a user or a hub collection registers) is refused
+by name, each with its own reason.
 
 ### What it refuses, and why each refusal is not a gap
 
 - **`blocks.{i}.hook_mlp_in` and `blocks.{i}.hook_attn_in`**, with the name to ask for instead. See the
   section above: those name a tensor a whole normalization away from the sublayer's argument.
 - **Latent-model handles**, as above.
-- **Undeclared intervention modes**, named on the mode axis rather than applied as the nearest declared
-  one.
+- **Undeclared intervention ops**, named by op rather than applied as the nearest declared one.
 - **A callable `names_filter` that selects a hook this backend cannot map**, rather than capturing the
   mappable subset. A cache holding part of what was asked for is indistinguishable from a complete one
   at the call site.
@@ -105,7 +108,7 @@ That is the answer this file is describing, and if the two ever disagree, the ba
 
 ## Requirements
 
-`interp-engine~=1.11.1`, and an Interpretune build with hub-delivered adapter support (speediedan/interpretune#125).
+`interp-engine~=1.12.0`, and an Interpretune build with hub-delivered adapter support (speediedan/interpretune#125).
 
 The pin is deliberate: interp-engine's 1.x minors change signatures without deprecation aliases, as a
 considered choice on their part. Every engine symbol is reached through one seam in the entrypoint,
