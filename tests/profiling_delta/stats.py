@@ -11,8 +11,8 @@
 # limitations under the License.
 """Memory statistics for the interpretune-versus-upstream profiling deltas.
 
-Vendored verbatim from interpretune `tests/profiling_delta/stats.py` at c495f864
-(feature/811_fts_profiling_cases): the harness does not ship in the interpretune package this
+Vendored verbatim from interpretune `tests/profiling_delta/stats.py` at 0f242979
+(#831 on main): the harness does not ship in the interpretune package this
 repository installs. If it moves into `interpretune.testing`, delete this copy and import it.
 
 Two layers live here. The collector (``memory_stats``, ``StepRecorder``) is the only part that touches the
@@ -240,7 +240,7 @@ def slope(values: list[float]) -> float:
 
 
 # Steps after a phase's transition step that are still allocator settling, not steady state: measured on gpt2 under
-# FTSController, both arms move by up to ~0.8 MiB at the step after a thaw and are flat from the one after.
+# TuningScheduler, both arms move by up to ~0.8 MiB at the step after a thaw and are flat from the one after.
 PHASE_SETTLE_STEPS = 1
 
 

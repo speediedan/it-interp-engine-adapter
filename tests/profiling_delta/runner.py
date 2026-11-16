@@ -11,7 +11,7 @@
 # limitations under the License.
 """Run the arms of a composition, one subprocess per arm, and pair their results.
 
-Vendored from interpretune `tests/profiling_delta/runner.py` at c495f864 (feature/811_fts_profiling_cases),
+Vendored from interpretune `tests/profiling_delta/runner.py` at 0f242979 (#831 on main),
 adapted only in its imports and subprocess environment (interpretune#50 here): the harness does not ship in
 the interpretune package this repository installs, so the protocol is copied rather than imported. If the
 harness moves into `interpretune.testing`, delete this copy and import it. Planted-leak composition
