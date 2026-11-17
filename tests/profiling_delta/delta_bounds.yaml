@@ -1,7 +1,47 @@
 # Frozen memory-delta bounds: per vendor, per composition, per gated metric, the accepted baseline
-# (interpretune-minus-upstream median, bytes) and the tolerance around it (bytes). Nothing is frozen yet:
-# bounds are frozen only from spread measured on BOTH vendors, and neither pair has an AMD measurement.
-# Until then both pairs are report-only (measured and printed, never gated). The recorded NVIDIA medians
-# live in the PR that introduced the pairs.
-cuda: {}
-rocm: {}
+# (interpretune-minus-upstream median, bytes) and the tolerance around it (bytes). Written by
+# `python -m tests.profiling_delta.freeze --artifacts <nvidia dir> <amd dir> --out tests/profiling_delta/delta_bounds.yaml`
+# from two runs of five repeats per vendor (RTX 4090 and Radeon AI PRO R9700, interpretune 05cd5b1f, 2026-11-17).
+# Every repeat measured the same delta, so each tolerance is the stats floor. See README.md for the numbers.
+cuda:
+  interp_engine_circuit_tracer_test:
+    end_current:
+      baseline: 592871424.0
+      tolerance: 8388608.0
+    peak_alloc:
+      baseline: 1325919232.0
+      tolerance: 8388608.0
+    slope[0]:
+      baseline: -376832.0
+      tolerance: 65536.0
+  interp_engine_test:
+    end_current:
+      baseline: 0.0
+      tolerance: 8388608.0
+    peak_alloc:
+      baseline: 0.0
+      tolerance: 8388608.0
+    slope[0]:
+      baseline: 0.0
+      tolerance: 65536.0
+rocm:
+  interp_engine_circuit_tracer_test:
+    end_current:
+      baseline: 581139968.0
+      tolerance: 8388608.0
+    peak_alloc:
+      baseline: 1288965120.0
+      tolerance: 8388608.0
+    slope[0]:
+      baseline: -360448.0
+      tolerance: 65536.0
+  interp_engine_test:
+    end_current:
+      baseline: 0.0
+      tolerance: 8388608.0
+    peak_alloc:
+      baseline: 0.0
+      tolerance: 8388608.0
+    slope[0]:
+      baseline: 0.0
+      tolerance: 65536.0

@@ -21,11 +21,26 @@ IT_PROFILING_DELTA_DIR=/tmp/artifacts IT_RUN_CUDA_TESTS=1 python -m pytest tests
 ```
 
 A composition with no entry in `delta_bounds.yaml` for the running vendor is report-only: measured and
-printed, never gated. Bounds freeze only from spread measured on both vendors.
+printed, never gated. Bounds freeze only from spread measured on both vendors, with `freeze.py` (vendored
+beside `stats.py`):
 
-Measured on NVIDIA (RTX 4090, 2026-10-25, 5 repeats): `interp_engine_test` delta is exactly zero on
-every metric (the engine wraps the HF model in place, so this is the expected result, now pinned by a
-test rather than asserted in prose). `interp_engine_circuit_tracer_test` reads +1.36 GiB peak and
-+0.53 GiB retained with a +192 KiB/step slope: the three-way composition runs two engines over one set
-of weights, and what that costs beyond a bare replacement model is now a recorded number instead of an
-assumption. It stays report-only until that overhead is judged acceptable as a baseline or reduced.
+```bash
+python -m tests.profiling_delta.freeze --artifacts <nvidia artifacts> <amd artifacts> --out tests/profiling_delta/delta_bounds.yaml
+```
+
+Both pairs are frozen on both vendors. Measured 2026-11-17 against interpretune `05cd5b1f`, two runs of five
+repeats per vendor; every repeat gave the same delta, so each tolerance is the floor in `stats.py` (8 MiB for
+peak and retained bytes, 64 KiB per step for the slope):
+
+| composition | vendor | peak_alloc delta | end_current delta | slope |
+| --- | --- | --- | --- | --- |
+| `interp_engine_test` | NVIDIA RTX 4090 | 0 | 0 | 0 |
+| `interp_engine_test` | AMD Radeon AI PRO R9700 | 0 | 0 | 0 |
+| `interp_engine_circuit_tracer_test` | NVIDIA RTX 4090 | +1264 MiB | +565 MiB | -368 KiB/step |
+| `interp_engine_circuit_tracer_test` | AMD Radeon AI PRO R9700 | +1229 MiB | +554 MiB | -352 KiB/step |
+
+`interp_engine_test` is exactly zero on both vendors: the engine wraps the HF model in place, so capturing
+through the composition costs nothing. `interp_engine_circuit_tracer_test` records what the three-way
+composition costs over a bare replacement model; the two vendors agree to within 3%. The bound is a regression
+gate on that cost as it stands, not a judgement that it is the right cost: reducing it is a change to the
+baseline, and freezing it means growth is caught rather than absorbed.
