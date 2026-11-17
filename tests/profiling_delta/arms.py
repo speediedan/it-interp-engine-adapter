@@ -136,10 +136,17 @@ def _hosted(composition_class, hf_model, it_cfg, pre_attrs: dict[str, Any] | Non
 
 
 def _it_cfg(staged_module, model_id: str, **extra):
+    # the stub carries every module-config field the hosted hooks read, at the real config's default
+    # (`hf_from_pretrained_cfg` is read by circuit-tracer's replacement-model loader)
     return type(
         "_Cfg",
         (),
-        {"model_name_or_path": model_id, "interp_engine_cfg": staged_module.InterpEngineConfig(), **extra},
+        {
+            "model_name_or_path": model_id,
+            "interp_engine_cfg": staged_module.InterpEngineConfig(),
+            "hf_from_pretrained_cfg": None,
+            **extra,
+        },
     )()
 
 
