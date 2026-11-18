@@ -15,7 +15,7 @@ pytest.importorskip("interpretune.testing.conformance", reason="needs interpretu
 from interpretune.testing.conformance import ConformanceTarget  # noqa: E402
 from interpretune.testing.conformance.tuning import TuningConformance  # noqa: E402
 
-from test_conformance import COMPOSITION, build_session_cfg, load_component  # noqa: E402
+from tests.test_conformance import COMPOSITION, build_session_cfg, load_component  # noqa: E402
 
 
 class TestInterpEngineTuning(TuningConformance):
