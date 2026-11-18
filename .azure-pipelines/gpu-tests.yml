@@ -138,7 +138,7 @@ jobs:
           displayName: "Install"
 
         - bash: bash .azure-pipelines/scripts/ctr.sh 'python .azure-pipelines/scripts/warm_seed.py'
-          displayName: "Warm the conformance seed component"
+          displayName: "Warm the conformance seed component and the gated delta-pair model"
           env:
             HF_TOKEN: $(HF_MCP_TOKEN_RW)
 

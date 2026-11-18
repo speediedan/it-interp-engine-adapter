@@ -29,7 +29,7 @@ if not fts_views_available():
 
 from interpretune.testing.conformance import ConformanceInputs  # noqa: E402
 
-from test_conformance import COMPOSITION, load_component  # noqa: E402
+from tests.test_conformance import COMPOSITION, load_component  # noqa: E402
 
 SITE = "model.transformer.h.5"
 # the steering vector is an `add` OpIntervention; its learned direction is the operand's tensor

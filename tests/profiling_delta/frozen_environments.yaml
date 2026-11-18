@@ -1,0 +1,17 @@
+# Each vendor's frozen delta bounds are valid only in this environment (see environment.py).
+cuda:
+  accelerate: 1.16.0
+  circuit-tracer: 0.5.3.dev59+g6f7bc8271
+  interp-engine: 1.12.1
+  nnsight: 0.8.2
+  torch: 2.15.0+cu132
+  transformer-lens: 4.4.0
+  transformers: 5.22.2
+rocm:
+  accelerate: 1.16.0
+  circuit-tracer: 0.5.3.dev59+g6f7bc8271
+  interp-engine: 1.12.1
+  nnsight: 0.8.2
+  torch: 2.15.0+rocm10.0
+  transformer-lens: 4.4.0
+  transformers: 5.22.2
