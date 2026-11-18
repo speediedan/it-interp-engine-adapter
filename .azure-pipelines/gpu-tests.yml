@@ -243,8 +243,13 @@ jobs:
           for key in sorted(((manifest.get("module") or {}).get("configs") or {})):
               pull_component_config(SEED_REPO, key, revision=SEED_REVISION)
           print(f"warmed {SEED_REPO}@{commit}")
+          # The profiling delta pair's circuit-tracer arms load google/gemma-3-1b-pt, which is gated, and the
+          # test step carries no token. Cached files are enough: transformers loads a gated repo it has cached
+          # without one, and refuses it when the cache is empty.
+          from huggingface_hub import snapshot_download
+          print("warmed google/gemma-3-1b-pt at", snapshot_download("google/gemma-3-1b-pt"))
           PY
-        displayName: "Warm the conformance seed component"
+        displayName: "Warm the conformance seed component and the gated delta-pair model"
         env:
           HF_TOKEN: $(HF_MCP_TOKEN_RW)
 
