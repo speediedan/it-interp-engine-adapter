@@ -44,11 +44,28 @@ def _cuda_available() -> bool:
         return False
 
 
+def _on_rocm() -> bool:
+    try:
+        import torch
+
+        return bool(torch.version.hip)
+    except Exception:
+        return False
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "cuda: needs a CUDA device. Skipped unless a GPU is present AND IT_RUN_CUDA_TESTS=1. "
         "Both conditions, because a GPU being present is not a request to spend it.",
+    )
+    # The Azure GPU job runs on whichever agent is free, NVIDIA or AMD, and a ROCm torch answers `torch.cuda` for its
+    # HIP devices, so `cuda` means "a GPU" on both. A test that genuinely cannot run on ROCm (a vendor defect, such as
+    # speediedan/interpretune#1001's hipBLASLt over-read, fixed only in ROCm 10.1) says so with this marker and its
+    # issue, and is skipped on an AMD agent rather than holding every run to the NVIDIA host.
+    config.addinivalue_line(
+        "markers",
+        "nvidia_only(reason): cannot run on ROCm yet; skipped, with the reason (name the issue), under a ROCm torch.",
     )
 
 
@@ -58,6 +75,12 @@ def pytest_collection_modifyitems(config, items):
     Note what this does NOT do: it does not reassign `items`. Adding a `items[:] = ...` here is the
     exact regression the module docstring describes, and the accompanying test exists to catch it.
     """
+    if _on_rocm():
+        for item in items:
+            mark = item.get_closest_marker("nvidia_only")
+            if mark is not None:
+                why = mark.kwargs.get("reason") or (mark.args[0] if mark.args else "no reason given")
+                item.add_marker(pytest.mark.skip(reason=f"nvidia_only on ROCm: {why}"))
     requested = os.getenv("IT_RUN_CUDA_TESTS", "0") == "1"
     if requested and _cuda_available():
         return
