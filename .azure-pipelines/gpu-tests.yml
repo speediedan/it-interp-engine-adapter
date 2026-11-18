@@ -5,10 +5,10 @@
 # `ci.yml`'s `cpu` job is the gate that runs on every push. Its `gpu` job is deliberately inert: it is
 # `workflow_dispatch`-only against `runs-on: [self-hosted, gpu]`, and exists as the shape a HUB
 # CONTRIBUTOR with their own GPU runner would use. There is no GitHub Actions self-hosted runner on the
-# maintainer's host, so that job never runs here and is not the route to GPU coverage for this repo.
+# maintainer's hosts, so that job never runs here and is not the route to GPU coverage for this repo.
 #
-# This pipeline is that route. It targets the same self-hosted Azure agent interpretune and
-# finetuning-scheduler already use, which is where this host's GPUs actually are.
+# This pipeline is that route. It runs on the same self-hosted Azure agents interpretune and
+# finetuning-scheduler use, which is where the GPUs actually are.
 #
 # PATH FILTERS AND PULL REQUESTS -- read before assuming a docs push will be skipped.
 #
@@ -18,11 +18,10 @@
 # this: Microsoft documents that PR pipelines run on the merge commit regardless of skip tokens, which
 # suppress only CI/branch triggers. What the filters DO buy is skipping a PR whose ENTIRE diff is
 # documentation, which is why the exclusions are stated rather than left implicit.
-# NO `main` IN THE CI TRIGGER (2026-09-28). The self-hosted GPU agent is one serial slot shared across
-# repositories, and a post-merge main build re-ran trees that the merged PR's gate had just validated on
-# its merge ref: several such builds queued per day, each costing a full slot or a manual rejection.
-# Main is validated by the PR gates (run on the merge commit), release/tag builds, and a MANUAL run
-# (`az pipelines run --branch main`) queued when it adds coverage and the agent is otherwise idle.
+# NO `main` IN THE CI TRIGGER (2026-09-28). A post-merge main build re-ran trees that the merged PR's gate
+# had just validated on its merge ref: several such builds queued per day, each costing a full GPU slot
+# or a manual rejection. Main is validated by the PR gates (run on the merge commit), release/tag builds,
+# and a MANUAL run (`az pipelines run --branch main`) queued when it adds coverage and an agent is idle.
 trigger:
   branches:
     include:
@@ -55,277 +54,113 @@ pr:
       - "*.md"
   drafts: false # only for PRs that are ready for review
 
+parameters:
+  # ANY VENDOR (2026-11-18, maintainer: the adapter pipeline should not require the NVIDIA host). Every triggered build
+  # runs on whichever GPU agent is free, NVIDIA (speediedl) or AMD (speedieamd). Until this change the job demanded
+  # `GPU_VENDOR -equals nvidia` (PR #49, "until the AMD agent is admitted"), so every adapter gate queued behind
+  # interpretune's on the one NVIDIA agent while the AMD agent sat idle (measured 2026-11-17: gate 2109 approved and
+  # undispatched behind 2098). A manual run may still pin one vendor's agent with this parameter, which is the route for
+  # a one-off check that needs NVIDIA (or AMD) specifically.
+  #
+  # A test that genuinely cannot run on ROCm carries the `nvidia_only` marker (tests/conftest.py) and its issue, and is
+  # skipped on an AMD agent. None does today: the suite reaches devices through `torch.accelerator` / `torch.cuda`, both
+  # vendor-neutral, and nothing here calls circuit-tracer's `head_loadings`, the path speediedan/interpretune#1001
+  # (ROCm 10.0 hipBLASLt over-read, fixed in ROCm 10.1) faults. When a marked test does appear, run it on NVIDIA as
+  # well: either pin `vendor: nvidia` for that check, or add a second job from the same template with `vendor: nvidia`,
+  # `jobClass: ci-vendor-marked` and `-m nvidia_only`, so a gate that lands on AMD does not leave it unrun.
+  - name: vendor
+    displayName: GPU vendor
+    type: string
+    default: any
+    values:
+      - any
+      - nvidia
+      - amd
+  # The images each vendor's agent runs, digest-pinned (the template refuses an undigested one): interpretune's own
+  # (its .azure-pipelines/gpu-tests.yml `images`), built by its dockers/docker_images_main.sh. This job installs
+  # interpretune @ main into them, so they move with interpretune's: bump both digests together when interpretune does.
+  - name: images
+    type: object
+    default:
+      nvidia: "speediedan/interpretune:py3.13-pt2.15.0-azpl-init@sha256:fda1c1cd8373da860e38d9aaea5bd1a096dbc1ed886043a3c8054d2b0c7bd7e8"
+      amd: "speediedan/interpretune:py3.13-pt2.15.0-rocm10.0-azpl-init@sha256:bd6ef05d876cea67c58b6f108a4ea300227f6272843a8f246c172c7689307283"
+
+# The any-vendor GPU job template interpretune and finetuning-scheduler share, pinned to the gpu-epsilon tag interpretune
+# uses. It picks the image and device options from the vendor the agent declares (an Azure `container:` resource is
+# fixed before the agent is known, which is why this is now a host job that starts its own container), checks the
+# digest pin, mounts the checkout, the host lease directory at /gpu_leases and the host's lease tool, and removes the
+# container at the end. This job is interpretune-family work, so it takes interpretune's project capability (`ci-it`,
+# which both agents carry) and its variable prefix (`IT`); its container is named `it-<build>-<attempt>-adapter_gpu`.
+resources:
+  repositories:
+    - repository: ci
+      type: github
+      name: speediedan/gpu-epsilon
+      endpoint: speediedan
+      ref: refs/tags/gpu-job-v1
+
 jobs:
-  - job: gpu
-    timeoutInMinutes: 45
-    cancelTimeoutInMinutes: 2
+  - template: templates/gpu-job.yml@ci
+    parameters:
+      jobName: adapter_gpu
+      displayName: GPU tests (${{ parameters.vendor }} vendor)
+      vendor: ${{ parameters.vendor }}
+      jobClass: ci-any-vendor
+      project: ci-it
+      images: ${{ parameters.images }}
+      variablePrefix: IT
+      artifactPrefix: it
+      # Install (two git installs plus circuit-tracer) and the suite take about 20 minutes; the lease wait below can
+      # add 40. The container sleeps five minutes past this, so one leaked by an agent crash exits on its own.
+      timeoutInMinutes: 75
+      workspaceClean: outputs
+      # The agent's HF cache, created on first use on an agent that has never run this job.
+      hostPrep: |
+        hf_cache="/opt/az_pipeline_agent/_work/hf_cache/$(Agent.Name)"
+        mkdir -p "$hf_cache"
+      containerOptions: |
+        -v "${hf_cache}:/opt/hf_cache:rw"
+        -e HF_HOME=/opt/hf_cache -e HF_DATASETS_CACHE=/opt/hf_cache/datasets
+        -e HF_HUB_CACHE=/opt/hf_cache/hub -e XDG_CACHE_HOME=/opt/hf_cache
+      # Run by the template's `always()` cleanup before it removes the container, so a failed or cancelled build still
+      # releases. Removing the container would free the flock anyway (the kernel drops the lock with its holder), but
+      # the holder METADATA file is removed here, and a stale holder is what makes `--status` misattribute a hold.
+      releaseCommand: bash .azure-pipelines/scripts/ctr.sh 'source scripts/gpu_lease_wrap.sh && ci_gpu_lease_release /gpu_leases /tmp/azp_gpu_lease.pid'
+      steps:
+        # Serialize against local GPU work on this host. Waiting here for tens of minutes is the system working, not a
+        # hung build: do not cancel, and never force-reset the lease from the host side. See the `gpu-lease` and
+        # `az-pipelines-ops` skills. The lock is the host's whole-server `gpu.lock`, the same contract on both agents.
+        - bash: |
+            bash .azure-pipelines/scripts/ctr.sh 'source scripts/gpu_lease_wrap.sh && ci_gpu_lease_acquire /gpu_leases /tmp/azp_gpu_lease.pid 2400 "azure-iea-${BUILD_BUILDID}"'
+          displayName: "Acquire host GPU lease"
 
-    pool:
-      name: default
-      # Interim, until the AMD agent is admitted to the any-vendor class: this job's image and device
-      # options are CUDA-only, so it demands an NVIDIA agent. GPU_VENDOR comes from each agent's .env
-      # (a system capability); a job whose demand no agent carries fails at queue time (interpretune #703).
-      demands:
-        - GPU_VENDOR -equals nvidia
+        - bash: bash .azure-pipelines/scripts/ctr.sh 'bash .azure-pipelines/scripts/install.sh'
+          displayName: "Install"
 
-    # CONTAINER, and specifically interpretune's image, for three reasons rather than convention:
-    #   1. The agent host's default `python3` is 3.10, below this project's `requires-python = ">=3.11"`.
-    #      A non-container job would have to hand-pick an interpreter and build an env from scratch.
-    #   2. The image already carries python 3.13 and a CUDA torch, so the install below adds only this
-    #      package and its interpretune/engine dependencies rather than ~2GB of wheels per run.
-    #   3. `ci_gpu_lease_acquire` records `container=yes` in the lease holder metadata unconditionally.
-    #      That tag is what marks a lease as CI-held, and the "never force-reset a CI-held lease" rule
-    #      depends on it being TRUE -- a non-container job would tag a host-visible pid as containerised
-    #      and misdirect anyone triaging a stuck lease.
-    container:
-      image: speediedan/interpretune:py3.13-pt2.13.0-azpl-init
-      mapDockerSocket: false
-      volumes:
-        - /opt/az_pipeline_agent/_work/hf_cache/$(Agent.Name):/opt/hf_cache:rw
-        # Host GPU-lease rendezvous directory. `flock` works on the inode, so a bind-mounted lock file
-        # interlocks between this container and processes on the host, which is what serializes this
-        # job against local GPU work WITHOUT any change to the agent installation. Fails open if absent.
-        - /tmp/di_leases:/gpu_leases
-      options: --gpus all --shm-size=512m
-      env:
-        HF_HOME: /opt/hf_cache
-        HF_DATASETS_CACHE: /opt/hf_cache/datasets
-        HF_HUB_CACHE: /opt/hf_cache/hub
-        XDG_CACHE_HOME: /opt/hf_cache
+        - bash: bash .azure-pipelines/scripts/ctr.sh 'python .azure-pipelines/scripts/warm_seed.py'
+          displayName: "Warm the conformance seed component"
+          env:
+            HF_TOKEN: $(HF_MCP_TOKEN_RW)
 
-    workspace:
-      clean: outputs
+        # Backend truth before the suite: the torch build must match the vendor the agent reported, with its devices
+        # visible. Vendor-neutral: `torch.cuda` is the device API on a ROCm torch too.
+        - bash: |
+            bash .azure-pipelines/scripts/ctr.sh 'python - <<"PY"
+            import os
+            import torch
+            expected = os.environ["IT_GPU_VENDOR"]
+            actual = "amd" if torch.version.hip else "nvidia" if torch.version.cuda else "cpu"
+            assert actual == expected, (expected, actual, torch.__version__)
+            assert torch.cuda.is_available(), "no GPU device visible to this job"
+            print({"torch": torch.__version__, "cuda": torch.version.cuda, "hip": torch.version.hip,
+                   "devices": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]})
+            PY'
+          displayName: "Verify GPU backend and visibility"
 
-    steps:
-      # Serialize against local GPU work on this host. The agent runs one job at a time, so this guards
-      # only against interactive/agent sessions and the sibling projects' suites. Waiting here for tens
-      # of minutes is the system working, not a hung build: do not cancel, and never force-reset the
-      # lease from the host side. See the `gpu-lease` and `az-pipelines-ops` skills.
-      - bash: |
-          source scripts/gpu_lease_wrap.sh
-          ci_gpu_lease_acquire /gpu_leases /tmp/azp_gpu_lease.pid 2400 "azure-iea-$(Build.BuildId)"
-        displayName: "Acquire host GPU lease"
-
-      - bash: |
-          set -e
-          echo "=== interpreter ==="
-          python --version
-          python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
-          echo "=== install ==="
-          # NO pip BOOTSTRAP, and NO `--system`. Both were wrong in the first revision of this file and
-          # the image's own shape is why (measured on this pool's image, and confirmed against
-          # interpretune's dockers/base-cuda/Dockerfile):
-          #
-          #   PATH        /tmp/venvs/it_dev/bin:...:/usr/local/bin
-          #   VIRTUAL_ENV /tmp/venvs/it_dev
-          #
-          #   * The active interpreter is a `uv venv`, and uv does not put pip in one. So
-          #     `python -m pip ...` fails with "No module named pip" before doing anything, which is
-          #     exactly how the first run of this pipeline died.
-          #   * `uv` is already installed system-wide at /usr/local/bin by the image, so there is
-          #     nothing to bootstrap.
-          #   * `uv pip install --system` would target /usr/lib/python3.13/site-packages, but the CUDA
-          #     torch lives in the VENV. That would have resolved a SECOND torch alongside the one this
-          #     job exists to exercise. Bare `uv pip install` honours VIRTUAL_ENV and installs beside it.
-          #
-          # Mirrors .github/workflows/ci.yml's install otherwise, with ONE deliberate difference: no
-          # `--torch-backend=cpu`. The image's CUDA torch is the point of running here, and forcing the
-          # CPU variant would silently make every GPU assertion below vacuous.
-          uv --version
-          #
-          # NO transformer-lens / sae-lens hand-carry. They were carried until speediedan/interpretune#401's
-          # follow-up (merged as c3423a5) declared jaxtyping and moved the analysis stack's module-level
-          # sae_lens import behind TYPE_CHECKING. transformer-lens had been silently supplying jaxtyping,
-          # which is why the pair had to be dropped together and why no in-repo env could reveal it.
-          # If a future interpretune reintroduces an undeclared import, this job fails at import rather
-          # than being masked by a pin here, which is the outcome worth having.
-          #
-          # VENNGRAM IS REQUIRED BY interpretune AND IS ON NO INDEX YET. interpretune's base `dependencies` name
-          # `venngram>=0.1.0.dev0`, which resolves only from git, and its git pin lives in its dependency groups,
-          # which a git install does not carry (as with circuit-tracer below). Read it the same way, from the
-          # interpretune `main` this job installs, so the two cannot drift. Delete this once venngram is on PyPI.
-          VG_REQ=$(python - <<'PY'
-          import tomllib, urllib.request, sys
-          url = "https://raw.githubusercontent.com/speediedan/interpretune/main/pyproject.toml"
-          data = tomllib.loads(urllib.request.urlopen(url, timeout=30).read().decode())
-          entries = sorted({e for g in data.get("dependency-groups", {}).values()
-                            for e in g if isinstance(e, str) and e.startswith("venngram @")})
-          if len(entries) != 1:
-              sys.exit(f"expected exactly one venngram pin in interpretune's dependency-groups, "
-                       f"found {len(entries)}: {entries}")
-          print(entries[0])
-          PY
-          )
-          echo "venngram: ${VG_REQ}"
-          uv pip install -e ".[test]" \
-            "interpretune[conformance] @ git+https://github.com/speediedan/interpretune.git@main" "${VG_REQ}"
-          # finetuning-scheduler as interpretune pins it: the tuning conformance (#48) needs its views, which no
-          # release carries yet. Derived, never copied; `scripts/interpretune_git_pin.py` says when this goes.
-          uv pip install "$(python scripts/interpretune_git_pin.py finetuning-scheduler)"
-          #
-          # CIRCUIT-TRACER, DERIVED FROM INTERPRETUNE'S OWN PIN RATHER THAN RESTATED HERE.
-          #
-          # The `(core, interp_engine, circuit_tracer)` composition's tests -- the pairing class, its MRO,
-          # and the guard that keeps this adapter's hook refusal alive inside the composition -- skip when
-          # circuit-tracer is absent. Both CI lanes lacked it, so the NEWEST and least-covered code in this
-          # repo was running nowhere. Measured on the merge build for that composition: 55 collected,
-          # 47 passed, 8 skipped.
-          #
-          # It cannot come along with interpretune: interpretune carries it in a PEP 735 `dependency-group`
-          # (`git-deps`), and groups do not transit a git install the way an extra would.
-          #
-          # It also cannot become an extra while it is a GIT pin: interpretune publishes to real PyPI, and
-          # PyPI rejects direct-reference (git URL) dependencies in published metadata. So `git-deps` is
-          # where a git URL is the only thing it CAN be, not a stylistic choice to be revisited.
-          #
-          # So it is READ from interpretune's `pyproject.toml` at the ref this job installs, never copied.
-          # Copying the SHA would re-create exactly the hand-carry this repo removed with transformer-lens
-          # and sae-lens: a second pin that looks authoritative, drifts silently, and is only discovered
-          # when the two disagree. Derived, it is right by construction and follows interpretune's bumps.
-          #
-          # THIS BLOCK HAS A DEFINED END, and it is written down so it does not quietly become permanent.
-          # When circuit-tracer's two upstream PRs land and interpretune retires the fork pin for a VERSION
-          # pin, that pin can live in an ordinary extra, an extra transits a git install normally, and this
-          # whole derivation should be DELETED in favour of installing that extra. A workaround that
-          # outlives its reason is indistinguishable from architecture to whoever reads it next.
-          CT_REQ=$(python - <<'PY'
-          import tomllib, urllib.request, sys
-          url = "https://raw.githubusercontent.com/speediedan/interpretune/main/pyproject.toml"
-          data = tomllib.loads(urllib.request.urlopen(url, timeout=30).read().decode())
-          entries = [e for g in data.get("dependency-groups", {}).values()
-                     for e in g if isinstance(e, str) and e.startswith("circuit-tracer")]
-          if len(entries) != 1:
-              sys.exit(f"expected exactly one circuit-tracer entry in interpretune's dependency-groups, "
-                       f"found {len(entries)}: {entries}")
-          print(entries[0])
-          PY
-          )
-          # RECORD WHAT WE ACTUALLY RESOLVED. This gate installs `interpretune @ main`, a MOVING
-          # reference, so its result is only meaningful against the interpretune commit that was `main`
-          # at install time -- and nothing else in the build captures that. Measured 2026-09-07: a gate
-          # here finished eight minutes before three interpretune PRs merged, and afterwards the only
-          # way to tell what it had validated was comparing timestamps against merge times.
-          #
-          # A recorded commit turns that inference into a lookup, and it is the whole cost of the fix.
-          python - <<'PY'
-          import json, importlib.metadata as md
-          try:
-              info = json.loads(md.distribution("interpretune").read_text("direct_url.json"))["vcs_info"]
-              print(f"RESOLVED interpretune: {info['commit_id']} (requested {info.get('requested_revision')})")
-          except Exception as exc:  # a non-VCS install has no direct_url; say so rather than fail the gate
-              print(f"RESOLVED interpretune: <no direct_url> ({type(exc).__name__}) version {md.version('interpretune')}")
-          PY
-          echo "circuit-tracer, as interpretune pins it: ${CT_REQ}"
-          uv pip install "${CT_REQ}"
-          echo "=== resolved, and from WHERE (a version string would not show a second torch) ==="
-          python -c "import torch, interpretune, interp_engine_adapter as a; print(torch.__file__); print(interpretune.__file__); print(a.__file__)"
-          # ASSERT THE COVERAGE EXISTS rather than inferring it from the install having been attempted. If
-          # circuit-tracer stops resolving, the composition tests go back to skipping and the build stays
-          # GREEN while covering less -- the precise failure this step was added to end.
-          python -c "import circuit_tracer; print('circuit_tracer', circuit_tracer.__file__)"
-        displayName: "Install"
-
-      - bash: |
-          set -e
-          # The conformance seed (interpretune's SEED_REPO at SEED_REVISION) is a PRIVATE Hub component
-          # the suite loads cache-only from HF_HOME; nothing else populates components on this mount,
-          # so warm it here (small, pinned, idempotent) with a token scoped to this step. Fetch-only:
-          # nothing hydrates, mirroring interpretune's "Warm Hub components" step.
-          python - <<'PY'
-          from interpretune.testing.conformance.inputs import SEED_REPO, SEED_REVISION
-          from interpretune.hub.components import (
-              pull_component_config,
-              pull_component_manifest,
-              pull_component_payloads,
-          )
-          manifest, commit = pull_component_manifest(SEED_REPO, revision=SEED_REVISION)
-          pull_component_payloads(SEED_REPO, manifest, commit)
-          for key in sorted(((manifest.get("module") or {}).get("configs") or {})):
-              pull_component_config(SEED_REPO, key, revision=SEED_REVISION)
-          print(f"warmed {SEED_REPO}@{commit}")
-          PY
-        displayName: "Warm the conformance seed component"
-        env:
-          HF_TOKEN: $(HF_MCP_TOKEN_RW)
-
-      - bash: |
-          set -e
-          nvidia-smi
-          python -c "import torch; assert torch.cuda.is_available(), 'no CUDA device visible to this job'"
-          echo "visible devices: $(python -c 'import torch; print(torch.cuda.device_count())')"
-        displayName: "Verify GPU visibility"
-
-      # REPORT `collected` BESIDE `passed`. A green pytest summary answers "did the tests I SELECTED
-      # pass" and reads as "did the tests pass". Those differ the moment anything narrows selection, and
-      # `IT_RUN_CUDA_TESTS` is a SELECTOR in interpretune's conftest (it replaces the collected list
-      # rather than adding to it), not merely a gate that un-skips tests.
-      #
-      # Today this repo has no conftest and no CUDA-marked tests, so both numbers are the full suite and
-      # this job runs the same tests as the CPU gate on GPU hardware. That is expected until the first
-      # device-dependent test lands. The comparison below is here so that when one does, a narrowed run
-      # cannot be reported as a full one.
-      #
-      # IF YOU ARE COPYING THIS FILE INTO ANOTHER ADAPTER REPO, the comparison is not optional there and
-      # may already be load-bearing on day one. A repo that carries a conftest honouring
-      # IT_RUN_CUDA_TESTS but has no CUDA-marked tests yet SELECTS ZERO and reports a green summary: the
-      # selector replaces the collected list, so "0 passed" is indistinguishable from success unless the
-      # collection count is printed beside it. That is worse than this repo's eventual case, because it
-      # is green from the first run rather than arriving later, and nothing else in the job would say so.
-      - bash: |
-          # `pipefail` MATTERS HERE and nowhere else in this file: pytest is piped to `tee` below, and
-          # `set -e` alone reports the exit status of the LAST command in a pipeline. Without it a failing
-          # suite would hand the step `tee`'s success and the build would go green on red tests -- a worse
-          # version of the exact silent-pass class the rest of this step exists to catch. Verified, not
-          # assumed: `set -e; (exit 1) | tee /dev/null` continues; adding `pipefail` stops.
-          set -eo pipefail
-          collected=$(python -m pytest --collect-only -q 2>/dev/null | tail -1)
-          echo "full collection: ${collected}"
-          # `-rs` so skip REASONS are in the same output the run already produces, and `tee` so the
-          # assertion below reads that run rather than a second one: running the suite twice to check a
-          # property of the first is both slower and a lie if the two runs ever disagree.
-          IT_RUN_CUDA_TESTS=1 python -m pytest -v -rs --durations=25 2>&1 | tee /tmp/gpu_run.txt
-          # ASSERT NOTHING SKIPPED FOR A MISSING OPTIONAL DEPENDENCY. This is the lane that installs
-          # circuit-tracer, so a skip here means the install above silently stopped working. Reporting
-          # `collected` beside `passed` catches a NARROWED selection; this catches the other shape, where
-          # the selection is full and part of it quietly opts out.
-          if grep -qiE "skipped.*circuit-tracer not installed" /tmp/gpu_run.txt; then
-            echo "ERROR: composition tests skipped because circuit-tracer is missing in the ONE lane"
-            echo "that is supposed to provide it. The install step above did not take."
-            grep -iE "SKIPPED" /tmp/gpu_run.txt || true
-            exit 1
-          fi
-        displayName: "Test (GPU)"
-        env:
-          # Approved: the conformance seed loads the Hub RTE component (interpretune inputs
-          # SEED_REPO), so this job opts into executing that pinned component's entrypoint. The warm
-          # step above only fetches; without this the suite refuses every seed-backed case by name.
-          IT_TRUST_REMOTE_CODE: "1"
-
-      # WORKSPACE OWNERSHIP, and it must run INSIDE the container, where this uid can still write.
-      # Under rootless docker with userns remapping, everything this job writes into the mapped
-      # workspace is owned by the container's host subuid, not by the agent. The agent's next build
-      # begins with `git clean -ffdx` / `git reset --hard` as ITSELF, cannot remove those files, and
-      # falls back to deleting the source folder, which fails the same way -- so the checkout task
-      # fails before any step of ours runs and every subsequent build fails identically until someone
-      # with privileges clears the folder by hand. `.pytest_cache` is the only directory in this
-      # category today; the chmod covers anything else the run leaves behind.
-      #
-      # Measured here: a build failed at `Checkout ... to s` in 22s with
-      # `System.UnauthorizedAccessException: Access to the path '.../s/.pytest_cache/v/cache/nodeids'
-      # is denied`, left by the previous green run. Interpretune's own pipeline carries the same step
-      # for the same reason; this is that fix, not a new idea.
-      - bash: |
-          sudo chmod -R 775 "$(Build.SourcesDirectory)" || true
-          sudo rm -rf "$(Build.SourcesDirectory)/.pytest_cache" || true
-          echo "workspace ownership normalized for the next build"
-        displayName: "Normalize workspace ownership"
-        condition: always()
-
-      # `always()` so a failed or cancelled build still releases. Container teardown would free the
-      # flock regardless (the kernel releases the fd when the holder dies), but the holder METADATA file
-      # is removed here, and a stale holder is what makes `--status` misattribute a hold.
-      - bash: |
-          source scripts/gpu_lease_wrap.sh 2>/dev/null && \
-            ci_gpu_lease_release /gpu_leases /tmp/azp_gpu_lease.pid || true
-        displayName: "Release host GPU lease"
-        condition: always()
+        - bash: bash .azure-pipelines/scripts/ctr.sh 'bash .azure-pipelines/scripts/test_gpu.sh'
+          displayName: "Test (GPU)"
+          env:
+            # Approved: the conformance seed loads the Hub RTE component (interpretune inputs SEED_REPO), so this job
+            # opts into executing that pinned component's entrypoint. The warm step only fetches; without this the
+            # suite refuses every seed-backed case by name.
+            IT_TRUST_REMOTE_CODE: "1"
