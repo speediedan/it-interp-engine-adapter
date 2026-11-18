@@ -6,7 +6,7 @@ usage: python scripts/interpretune_git_pin.py <package> [<interpretune ref>]
 CI installs ``interpretune @ main``, and a PEP 735 dependency group does not transit a git install, so a package
 interpretune carries only there (a git URL, which PyPI metadata cannot hold) has to be installed beside it. Reading the
 pin from interpretune's ``pyproject.toml`` at the ref CI installs keeps one pin rather than two: a copied SHA looks
-authoritative and drifts silently. ``.azure-pipelines/gpu-tests.yml`` derives circuit-tracer's the same way, inline.
+authoritative and drifts silently. ``.azure-pipelines/scripts/install.sh`` derives circuit-tracer's the same way, inline.
 
 finetuning-scheduler is read here until 2.15.0, the first release with ``TunableView`` and its conformance cases, is
 on PyPI and interpretune's ``conformance`` extra carries it (speediedan/interpretune#760). Then this install, and this
