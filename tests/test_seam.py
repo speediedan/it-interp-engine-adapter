@@ -1345,6 +1345,147 @@ class TestClampMapping:
             _clamp_cap_rows(torch.full((2, 8), float("nan")), "p")
 
 
+class TestSpanOracle:
+    """The span mappings against an oracle derived outside this repo, and the identities that define the ops.
+
+    The vectors were supplied by the J-lens steering work and reproduced independently before use, so the
+    mappings are not checked only against interpretune's reading of the spec (float64; ``V`` is
+    ``(k, d_model)`` with directions on the leading axis, ``M = V.T``, ``c = pinv(M) @ h``). Its two rows are
+    coupled, row cosine -0.563, which is the common case for J-lens pole pairs rather than an edge case:
+    ``reject`` must reproduce the oracle through its orthonormalised basis, and ``clamp`` must refuse.
+
+    The identities hold for any ``k`` and conditioning, and they divide the work. The complement identity
+    catches an edit that leaves ``span(V)``; the targets identity catches a change of basis, which keeps
+    every edit inside the span and so passes the first.
+    """
+
+    TOLERANCE = 1e-5  # the basis and caps are computed in float32; measured agreement is ~1e-7
+
+    V = ((0.90, -0.30, 0.50, 0.10, -0.70, 0.20), (-0.40, 0.80, -0.10, 0.60, 0.30, -0.50))
+    H = (1.30, -0.70, 0.40, 0.90, -0.20, 0.60)
+    TARGETS = (0.25, -1.50)
+    REJECT = (0.2654342959, -0.4119409840, -0.1851713646, 0.7301452437, 0.6056088180, 0.4051208451)
+    CLAMP = (1.0904342959, -1.6869409840, 0.0898286354, -0.1448547563, -0.0193911820, 1.2051208451)
+    #: What orthonormalising for ``clamp`` returns: plausible, and 2.28 away from ``CLAMP``.
+    CLAMP_Q = (0.2095070498, 0.5916912530, -0.0356605896, 1.6760879328, 0.6326912901, -0.2147178218)
+
+    @staticmethod
+    def _t(values):
+        import torch
+
+        return torch.tensor(values, dtype=torch.float64)
+
+    @staticmethod
+    def _coords(h, V):
+        """Pseudoinverse coordinates of ``h`` along ``V``'s rows: the definition, not the mapping."""
+        import torch
+
+        return h @ torch.linalg.pinv(V.T).T
+
+    @classmethod
+    def _complement(cls, h, V):
+        return h - cls._coords(h, V) @ V
+
+    @staticmethod
+    def _gap(a, b):
+        return (a - b).abs().max().item()
+
+    def test_clamp_preserves_the_orthogonal_complement(self):
+        h, V = TestClampMapping._workbench()
+        for lo, hi in ((-0.5, 0.5), (0.25, 0.25), (None, 0.0)):
+            out = TestClampMapping._mapped(h, V, lo=lo, hi=hi)
+            assert self._gap(out, h) > 1e-2, "the band never bit, so the identity would hold vacuously"
+            assert self._gap(self._complement(out, V), self._complement(h, V)) < self.TOLERANCE
+
+    def test_the_complement_check_can_fail(self):
+        """A cap along anything but ``V``'s own rows leaks out of the span, and the identity sees it."""
+        import torch
+
+        h, V = TestClampMapping._workbench()
+        stray = torch.roll(V, 1, dims=1)  # still orthogonal rows, so mapped; e2 lies outside span(V)
+        out = TestClampMapping._mapped(h, stray)
+        assert self._gap(self._complement(out, V), self._complement(h, V)) > 1e-2
+
+    @pytest.mark.parametrize("target", [0.25, -1.5])
+    def test_clamp_reaches_its_targets_exactly(self, target):
+        h, V = TestClampMapping._workbench()
+        out = TestClampMapping._mapped(h, V, lo=target, hi=target)
+        assert self._gap(self._coords(out, V), target) < self.TOLERANCE
+
+    def test_the_oracle_is_self_consistent(self):
+        """The independent reproduction, pinned: the constants follow from ``V`` and ``h`` by definition."""
+        import torch
+
+        h, V, targets = self._t(self.H), self._t(self.V), self._t(self.TARGETS)
+        unit = V / V.norm(dim=1, keepdim=True)
+        assert (unit[0] @ unit[1]).item() == pytest.approx(-0.563392, abs=1e-6)
+        assert self._gap(self._complement(h, V), self._t(self.REJECT)) < 1e-9
+        assert self._gap(h + (targets - self._coords(h, V)) @ V, self._t(self.CLAMP)) < 1e-9
+        Q, _ = torch.linalg.qr(V.T)
+        assert self._gap(h + (targets - h @ Q) @ Q.T, self._t(self.CLAMP_Q)) < 1e-9
+
+    def test_reject_reproduces_the_oracle(self):
+        h, V = self._t(self.H).unsqueeze(0), self._t(self.V)
+        want = self._t(self.REJECT).unsqueeze(0)
+        assert self._gap(TestRejectMapping._mapped(h, V, 1.0), want) < self.TOLERANCE
+        assert self._gap(TestRejectMapping._reference(h, V, 1.0).to(want.dtype), want) < self.TOLERANCE
+
+    def test_reject_is_idempotent_and_empties_the_span(self):
+        h, V = self._t(self.H).unsqueeze(0), self._t(self.V)
+        once = TestRejectMapping._mapped(h, V, 1.0)
+        assert self._gap(TestRejectMapping._mapped(once, V, 1.0), once) < self.TOLERANCE
+        assert self._gap(self._coords(once, V), 0.0) < self.TOLERANCE
+
+    def test_the_reject_identities_can_fail(self):
+        """Coupled rows composed raw, without the orthonormalised basis, break both identities loudly."""
+        import torch
+        from interp_engine import SteerSpec
+        from interp_engine.steer import steer_delta
+
+        h, V = self._t(self.H).unsqueeze(0), self._t(self.V)
+        unit = V / V.norm(dim=1, keepdim=True)
+
+        def raw(x):
+            total = torch.zeros_like(x)
+            for row in unit:
+                total = total + steer_delta(SteerSpec(vector=row, layer=0, coeff=0.0, method="orthogonal"), x, row)
+            return x + total
+
+        once = raw(h)
+        assert self._gap(raw(once), once) > 1e-2
+        assert self._gap(self._coords(once, V), 0.0) > 1e-2
+
+    def test_clamp_over_the_oracle_rows_is_refused_naming_the_cosine(self):
+        from interp_engine_adapter.adapter import UnmappableHookError, _clamp_cap_rows
+
+        with pytest.raises(UnmappableHookError, match=r"coupled rows \(worst pairwise cosine 0\.563"):
+            _clamp_cap_rows(self._t(self.V), "test")
+
+    def test_orthonormalising_for_clamp_returns_the_wrong_answer(self):
+        """The shortcut the refusal exists for, through the engine's own caps.
+
+        Orthonormalising spans the same subspace, which is why ``reject`` may take it. ``clamp`` may not: its
+        targets are coordinates in the given basis, so re-expressing them silently answers a different question
+        while returning a plausible tensor. Only the targets identity tells the two apart.
+        """
+        import torch
+        from interp_engine.steer import steer_delta
+
+        from interp_engine_adapter.adapter import _Seam
+
+        h, V, targets = self._t(self.H).unsqueeze(0), self._t(self.V), self._t(self.TARGETS)
+        Q, _ = torch.linalg.qr(V.T)
+        total = torch.zeros_like(h)
+        for q, t in zip(Q.T, self.TARGETS):
+            spec = _Seam.steer_spec(vector=q, layer=0, method="projection_cap", minimum=t, maximum=t, explicit=True)
+            total = total + steer_delta(spec, h, q)
+        shortcut = h + total
+        assert self._gap(shortcut, self._t(self.CLAMP_Q).unsqueeze(0)) < self.TOLERANCE
+        assert self._gap(shortcut, self._t(self.CLAMP).unsqueeze(0)) == pytest.approx(2.278632, abs=1e-4)
+        assert self._gap(self._complement(shortcut, V), self._complement(h, V)) < self.TOLERANCE
+        assert self._gap(self._coords(shortcut, V), targets) > 1.0
+
+
 class TestSpanOperandsAreRefused:
     """A `(k, d_model)` operand must be refused HERE, because the engine does not reliably refuse it.
 

@@ -64,11 +64,11 @@ worse than an error. Not `GRADIENTS`. It requires nothing of another component.
 
 Its intervention support record declares three ops from venngram's registry, each mapped to an engine steering
 method whose arithmetic was measured to match: `add` (`additive`), `reject` (`orthogonal`, over an
-orthonormalised span) and `clamp` (`projection_cap`). Targets are a whole activation or a unit set scattered into
-one, at either position scope: `LAST_TOKEN` (the default) or `ALL_POSITIONS`. A payload mixing the two scopes is
-expressed, not refused, by nesting one steering context per scope group. Every other registered op (`replace`,
-`patch`, `project`, `scale`, `replace_with_error`, and any op a user or a hub collection registers) is refused
-by name, each with its own reason.
+orthonormalised span) and `clamp` (`projection_cap`, one cap per row of a mutually orthogonal operand). Targets
+are a whole activation or a unit set scattered into one, at either position scope: `LAST_TOKEN` (the default) or
+`ALL_POSITIONS`. A payload mixing the two scopes is expressed, not refused, by nesting one steering context per
+scope group. Every other registered op (`replace`, `patch`, `project`, `scale`, `replace_with_error`, and any op
+a user or a hub collection registers) is refused by name, each with its own reason.
 
 ### What it refuses, and why each refusal is not a gap
 
@@ -76,6 +76,12 @@ by name, each with its own reason.
   section above: those name a tensor a whole normalization away from the sublayer's argument.
 - **Latent-model handles**, as above.
 - **Undeclared intervention ops**, named by op rather than applied as the nearest declared one.
+- **A `clamp` over coupled rows**, naming the worst pairwise cosine. `clamp` bounds pseudoinverse coordinates,
+  which depend on every row at once, while the engine caps one unit direction per spec, so only mutually
+  orthogonal rows decompose into per-row caps. Orthonormalising first is not the fix it is for `reject`:
+  rejection depends on the span alone, but a band is stated in coordinates of the given basis, and a change of
+  basis answers a different question with a plausible tensor (2.28 off on a J-lens pole pair at row cosine
+  -0.563). A clamp row of zero is refused too, having no direction to cap along.
 - **A callable `names_filter` that selects a hook this backend cannot map**, rather than capturing the
   mappable subset. A cache holding part of what was asked for is indistinguishable from a complete one
   at the call site.
