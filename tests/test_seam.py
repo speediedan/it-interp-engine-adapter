@@ -692,6 +692,44 @@ class TestTheHookInventoryIsInterpretunesVocabulary:
                 lambda name: name.endswith("hook_mlp_out") or name.endswith("hook_attn_in"), _FakeEngineModel()
             )
 
+    @pytest.mark.parametrize(
+        "predicate",
+        [
+            pytest.param(lambda name: name.endswith("hook_out"), id="endswith-hook_out"),
+            pytest.param(lambda name: name.startswith("blocks.5."), id="one-layer"),
+            pytest.param(lambda name: "mlp" in name, id="anything-mlp"),
+            pytest.param(lambda name: True, id="everything"),
+        ],
+    )
+    def test_a_broad_predicate_narrowed_by_the_capture_declaration_is_never_refused(self, predicate):
+        """The refusal names `can_capture` as the way to keep a broad predicate, so that way has to work.
+
+        Each predicate here is refused on its own, and the same predicate intersected with the backend's own capture
+        declaration must select exactly the declared-capturable names it matched, with nothing refused. That holds only
+        while the declaration and the seam answer through the same resolver; a declaration that drifted from the seam
+        would make the advice in the refusal a second refusal.
+        """
+        from interp_engine_adapter.adapter import (
+            InterpEngineModelBackend,
+            UnmappableHookError,
+            _hook_vocabulary,
+            _names_filter_to_list,
+        )
+
+        engine = _FakeEngineModel()
+        engine.hf_model.config.architectures = ["GPT2LMHeadModel"]
+        backend = InterpEngineModelBackend()
+        backend._engine_model = engine
+        support = backend.capture_support(engine.hf_model)
+
+        with pytest.raises(UnmappableHookError, match="support.can_capture"):
+            _names_filter_to_list(predicate, engine)
+
+        narrowed = _names_filter_to_list(lambda name: predicate(name) and support.can_capture(name), engine)
+        expected = [name for name in _hook_vocabulary(engine) if predicate(name) and support.can_capture(name)]
+        assert narrowed == expected
+        assert narrowed, "the narrowed predicate selected nothing, so it proves nothing about the refusal"
+
 
 class TestTheCircuitTracerGuardPropagatesOnlyOurOwnRefusals:
     """The guard must forward this adapter's refusals and swallow everything else.

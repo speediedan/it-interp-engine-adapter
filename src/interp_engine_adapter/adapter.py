@@ -579,6 +579,12 @@ def _partial_selection_message(selected: list[str], mappable: list[str], unmappa
     The counts are given because they carry the decision. A caller told "8 of 100 selected names are
     unmappable" can weigh narrowing the predicate against passing an explicit list; a caller told only
     "refused" cannot.
+
+    The refusal stays whole now that the backend declares its capture support: interpretune's contract
+    for that record is that an uncapturable point is refused with its reason rather than returned as a
+    short cache. What the declaration adds is the way out, so the message names it. A broad predicate
+    narrowed by `can_capture` selects only what the seam maps, because both answer through the same
+    resolver.
     """
 
     def base(name: str) -> str:
@@ -593,7 +599,10 @@ def _partial_selection_message(selected: list[str], mappable: list[str], unmappa
         f"Refused rather than captured PARTIALLY: a cache holding the other {len(mappable)} is "
         "indistinguishable from a complete one at the call site, and a caller iterating it would compute "
         "over a filter that silently meant less than it said. Narrow the predicate to exclude those "
-        "names, or pass an explicit list of the hooks you want."
+        "names, or pass an explicit list of the hooks you want. To keep a broad predicate, intersect it "
+        "with this backend's capture declaration: `support = module.model_backend.capture_support("
+        "module.model)`, then `lambda name: predicate(name) and support.can_capture(name)` "
+        "(`support.describe()` names every gap)."
     )
 
 

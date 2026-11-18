@@ -101,6 +101,20 @@ jobs:
           IT_TRUST_REMOTE_CODE: "1"
         run: pytest -v
 
+  skills-upstream-sync:
+    # The online half of the vendored-skill checks. The `vendored-skills-unmodified` hook catches a local edit, offline;
+    # this catches the shared master (speediedan/skills) moving ahead of the vendored copies. It reads the master over
+    # the network, so it is a job rather than a hook, and it fails on drift: refresh the copies (and their manifests)
+    # from the master to clear it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: vendored skills match the shared master
+        run: python3 scripts/check_skills_upstream.py
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
   cold-venv:
     # THE BOOTSTRAP GATE: can this component come up for someone who has NOTHING?
     #
