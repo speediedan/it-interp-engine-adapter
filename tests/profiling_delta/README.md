@@ -28,16 +28,40 @@ beside `stats.py`):
 python -m tests.profiling_delta.freeze --artifacts <nvidia artifacts> <amd artifacts> --out tests/profiling_delta/delta_bounds.yaml
 ```
 
-Both pairs are frozen on both vendors. Measured 2026-11-17 against interpretune `05cd5b1f`, two runs of five
-repeats per vendor; every repeat gave the same delta, so each tolerance is the floor in `stats.py` (8 MiB for
-peak and retained bytes, 64 KiB per step for the slope):
+Then record the environment the artifacts were measured in, beside the bounds:
+
+```bash
+python -m tests.profiling_delta.environment --artifacts <nvidia artifacts> <amd artifacts>
+```
+
+**A bound is valid only in the environment it was frozen in.** A delta moves with every library either arm
+allocates through, not only with interpretune: bounds once frozen under torch 2.15.0+cu132 read as a 24 MiB
+regression in this repository's GPU gate, whose image carries torch 2.13.0+cu130, although interpretune had not
+changed the delta at all (re-measured with the gate's interpretune commit in the freeze environment, it matched to
+the byte). So `frozen_environments.yaml` records each vendor's versions of torch, transformers, accelerate,
+transformer-lens, nnsight, circuit-tracer and interp-engine (`environment.py`), every pair artifact records the
+versions it ran under, and the test refuses to compare against a bound frozen in a different environment, naming
+each version that differs. When the gate image or a resolved dependency moves, re-freeze in the gate's
+environment.
+
+The cuda bounds are frozen in the GPU gate's environment (2026-11-18: torch 2.13.0+cu130, transformer-lens 4.4.0,
+accelerate 1.16.0, circuit-tracer `6f7bc827`, interpretune `7e890500`), reproduced locally from the gate's resolved
+package set; two runs of five repeats on an RTX 4090 reproduced the gate's own measurement exactly. The rocm bounds
+are from 2026-11-17 (torch 2.15.0+rocm10.0, interpretune `05cd5b1f`, two runs of five repeats on a Radeon AI PRO
+R9700); the gate does not run on AMD yet.
 
 | composition | vendor | peak_alloc delta | end_current delta | slope |
 | --- | --- | --- | --- | --- |
 | `interp_engine_test` | NVIDIA RTX 4090 | 0 | 0 | 0 |
 | `interp_engine_test` | AMD Radeon AI PRO R9700 | 0 | 0 | 0 |
-| `interp_engine_circuit_tracer_test` | NVIDIA RTX 4090 | +1264 MiB | +565 MiB | -368 KiB/step |
+| `interp_engine_circuit_tracer_test` | NVIDIA RTX 4090 (gate env) | +1288 MiB | +555 MiB | +192 KiB/step |
 | `interp_engine_circuit_tracer_test` | AMD Radeon AI PRO R9700 | +1229 MiB | +554 MiB | -352 KiB/step |
+
+Every repeat on AMD, and on NVIDIA under torch 2.15, gave the same delta. Under the gate's torch 2.13 the first
+repeat of each run differs (slope delta -10.2 MiB/step, peak +5.4 MiB) while the other four are identical in both
+runs. `freeze.py` pools every repeat's spread across vendors, so that first repeat sets the three-way pair's
+tolerances on both vendors: 16.25 MiB for the peak and 31.3 MiB per step for the slope, where the floor is 8 MiB
+and 64 KiB per step. The slope band is therefore loose until the first-repeat effect is understood or excluded.
 
 `interp_engine_test` is exactly zero on both vendors: the engine wraps the HF model in place, so capturing
 through the composition costs nothing. `interp_engine_circuit_tracer_test` records what the three-way

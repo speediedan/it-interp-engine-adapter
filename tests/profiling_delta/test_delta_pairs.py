@@ -30,6 +30,7 @@ import pytest
 import yaml
 
 from tests.profiling_delta.arms import COMPOSITIONS
+from tests.profiling_delta.environment import environment_mismatch, frozen_environment, salient_versions
 from tests.profiling_delta.runner import measure_pair
 from tests.profiling_delta.stats import evaluate
 
@@ -53,7 +54,11 @@ def test_delta_pair(tmp_path, composition):
         pytest.importorskip("circuit_tracer", reason="the three-way composition needs circuit-tracer")
     out_dir = _artifact_dir(tmp_path)
     pair = measure_pair(composition, out_dir / "arms")
-    (out_dir / f"{composition}.pair.json").write_text(json.dumps(pair.to_json(), indent=1))
+    # both arms are subprocesses of this interpreter, so this process's versions are theirs
+    environment = salient_versions()
+    (out_dir / f"{composition}.pair.json").write_text(
+        json.dumps({**pair.to_json(), "environment": environment}, indent=1)
+    )
 
     for arm in (pair.it, pair.upstream):
         assert all(r["available"] for r in arm["repeats"]), f"{arm['arm']} arm saw no accelerator statistics"
@@ -66,5 +71,13 @@ def test_delta_pair(tmp_path, composition):
         summary = {m: pair.deltas[m]["median"] for m in ("peak_alloc", "end_current", "slope[0]") if m in pair.deltas}
         warnings.warn(f"{composition} on {pair.vendor}: report-only (no frozen bound); median deltas {summary}")
         return
+    frozen_env = frozen_environment(pair.vendor)
+    if frozen_env is None:
+        pytest.fail(f"{pair.vendor} has frozen bounds but no recorded environment in frozen_environments.yaml")
+    if mismatch := environment_mismatch(frozen_env, environment):
+        pytest.fail(
+            f"{composition} on {pair.vendor}: the bound was frozen in a different environment ({'; '.join(mismatch)}), "
+            "so the delta cannot be compared with it. Re-freeze in this environment (README.md)."
+        )
     failures = evaluate(pair.deltas, frozen)
     assert not failures, f"{composition} on {pair.vendor}: " + "; ".join(failures)
